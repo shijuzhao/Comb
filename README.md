@@ -1,2 +1,2 @@
 # Comb
-Comb is a plug-and-play storage system for long-context LLM serving.
+Comb is a plug-and-play caching system for long-context LLM serving.

@@ -1,0 +1,27 @@
+{
+    "train_batch_size": "auto",
+    "gradient_accumulation_steps": 1,
+    "bf16": {"enabled": true},
+    "optimizer": {
+        "type": "AdamW",
+        "params": {
+            "lr": 0.0001,
+            "weight_decay": 0.01
+        }
+    },
+    "scheduler": {
+        "type": "WarmupLR",
+        "params": {
+            "warmup_min_lr": 0,
+            "warmup_max_lr": 0.001,
+            "warmup_steps": 1000
+        }
+    },
+    "tensorboard": {
+        "enabled": true,
+        "log_dir": "./ds_logs",
+        "job_name": "comb_training"
+    },
+    "num_train_epochs": 3,
+    "save_steps": 500
+}
