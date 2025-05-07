@@ -1,7 +1,10 @@
 import torch
+from torch import nn
 from transformers import LLamaConfig, PreTrainedModel, LLamaForCausalLM
+from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaMLP, \
+                        LlamaRoteryEmbedding, LlamaAttention, repeat_kv
 from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.utils import replace_return_docstrings
 from typing import Optional, Tuple, Union, List
 
@@ -31,24 +34,251 @@ class CombLlamaConfig(LLamaConfig):
         self.rotary_embedding_num_attention_heads = 32
         self.rotary_embedding_num_layers = 32
     
+# Modified from transformers.models.llama.modeling_llama.LlamaDecoderLayer
+class CombLlamaSelfAttentionDecoderLayer(nn.Module):
+    def __init__(self, config: CombLlamaTextConfig, layer_idx: int):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+
+        self.self_attn = LlamaAttention(config=config, layer_idx=layer_idx)
+
+        self.mlp = LlamaMLP(config)
+        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.layer_idx = layer_idx
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cross_attention_states: Optional[torch.Tensor] = None,
+        cross_attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        """
+        Args:
+            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
+            attention_mask (`torch.FloatTensor`, *optional*):
+                attention mask of size `(batch_size, sequence_length)` if flash attention is used or `(batch_size, 1,
+                query_sequence_length, key_sequence_length)` if default attention is used.
+            output_attentions (`bool`, *optional*):
+                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                returned tensors for more detail.
+            use_cache (`bool`, *optional*):
+                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
+                (see `past_key_values`).
+            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+            cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
+                Indices depicting the position of the input sequence tokens in the sequence
+            position_embeddings (`Tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
+                Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
+                with `head_dim` being the embedding dimension of each attention head.
+            kwargs (`dict`, *optional*):
+                Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
+                into the model
+        """
+        residual = hidden_states
+
+        hidden_states = self.input_layernorm(hidden_states)
+
+        # Self Attention
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (self_attn_weights,)
+
+        if use_cache:
+            outputs += (present_key_value,)
+
+        return outputs
+
+class CrossAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(
+        self,
+        config: Optional[LLamaConfig] = None,
+        layer_idx: Optional[int] = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.num_heads = self.config.num_attention_heads
+        self.num_key_value_heads = self.config.num_key_value_heads
+        self.dropout = 0.0
+        self.hidden_size = config.hidden_size
+        self.head_dim = config.hidden_size // self.num_heads
+        self.layer_idx = layer_idx
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+
+        self.q_norm = LlamaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = LlamaTextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cross_attention_states: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Cache] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
+        bsz, q_len, _ = hidden_states.size()
+        query_states = self.q_proj(hidden_states)
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        query_states = self.q_norm(query_states)
+
+        if cross_attention_states is not None:
+            key_states = self.k_proj(cross_attention_states)
+            value_states = self.v_proj(cross_attention_states)
+            key_states = key_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            key_states = self.k_norm(key_states)
+            if past_key_value is not None:
+                # if we have a new image + new tokens, we only computed key_states on that new image
+                # we still update the cross key states, past_image, new_image. And use it!
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, {"cache_position": cache_position}
+                )
+        elif cache_position[0] != 0:
+            key_states, value_states = (
+                past_key_value.key_cache[self.layer_idx],
+                past_key_value.value_cache[self.layer_idx],
+            )
+        else:
+            raise ValueError(
+                "Cross attention layer can't find neither `cross_attn_states` nor cached values for key/values!"
+            )
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        if attention_mask is not None:  # no matter the length, we just slice it
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + causal_mask
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, -1)
+        attn_output = self.o_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return attn_output, attn_weights, past_key_value
+
+class CombLlamaCrossAttentionDecoderLayer(torch.nn.Module):
+    """Cross-attention transformer block with tanh-gated attention and feedforward."""
+
+    def __init__(self, config: CombLlamaTextConfig, layer_idx: int) -> None:
+        super().__init__()
+        self.layer_idx = layer_idx
+        self.cross_attn = CrossAttention(config, layer_idx=layer_idx)
+
+        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.cross_attn_attn_gate = torch.nn.Parameter(torch.zeros(1))
+
+        self.mlp = LlamaMLP(config)
+        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.cross_attn_mlp_gate = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cross_attention_states: torch.Tensor,
+        cross_attention_mask: torch.Tensor,
+        attention_mask: torch.Tensor,
+        # full_text_row_masked_out_mask: Tuple[torch.Tensor, torch.Tensor],
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor]:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+
+        hidden_states, attn_weights, past_key_value = self.cross_attn(
+            hidden_states=hidden_states,
+            attention_mask=cross_attention_mask,
+            cross_attention_states=cross_attention_states,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            cache_position=cache_position,
+        )
+        hidden_states = residual + self.cross_attn_attn_gate.tanh() * hidden_states
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        # if full_text_row_masked_out_mask is not None:
+        #     hidden_states = full_text_row_masked_out_mask[:, 0] * hidden_states  # type: ignore
+        hidden_states = residual + self.cross_attn_mlp_gate.tanh() * hidden_states
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (attn_weights,)
+
+        if use_cache:
+            outputs += (past_key_value,)
+
+        return outputs
+
 class CombLlamaPreTrainedModel(PreTrainedModel):
-    config_class = MllamaConfig
+    config_class = CombLlamaConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = [
-        "MllamaVisionEncoderLayer",
-        "MllamaCrossAttentionDecoderLayer",
-        "MllamaSelfAttentionDecoderLayer",
+        "ChunkModel",
+        "CombLlamaCrossAttentionDecoderLayer",
+        "CombLlamaSelfAttentionDecoderLayer",
     ]
     _supports_cache_class = True
     _supports_static_cache = False  # static cache cannot have different shapes for each layer
-    _supports_sdpa = True
+    _supports_sdpa = False
     _supports_quantized_cache = True
 
     def _init_weights(self, module):
         std = getattr(self.config, "initializer_range", self.config.get_text_config().initializer_range)
 
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
+        if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -59,22 +289,11 @@ class CombLlamaPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.weight.data.fill_(1.0)
             module.bias.data.zero_()
-        elif isinstance(module, MllamaTextRMSNorm):
+        elif isinstance(module, LlamaRMSNorm):
             module.weight.data.fill_(1.0)
-        elif isinstance(module, MllamaVisionModel):
-            nn.init.normal_(module.class_embedding.data, std=std)
-        elif isinstance(module, MllamaPrecomputedPositionEmbedding):
-            nn.init.normal_(module.embedding.data, std=std)
-            nn.init.zeros_(module.gate.data)
-        elif isinstance(module, MllamaVisionEncoderLayer) and module.is_gated:
-            nn.init.normal_(module.gate_attn.data, std=std)
-            nn.init.normal_(module.gate_ffn.data, std=std)
-        elif isinstance(module, MllamaCrossAttentionDecoderLayer):
+        elif isinstance(module, CombLlamaCrossAttentionDecoderLayer):
             module.cross_attn_attn_gate.data.zero_()
             module.cross_attn_mlp_gate.data.zero_()
-        elif isinstance(module, MllamaPrecomputedAspectRatioEmbedding):
-            if module.is_gated:
-                module.gate.data.zero_()
 
     # Copied from transformers.models.llama.modeling_llama.LlamaModel._update_causal_mask
     def _update_causal_mask(
@@ -201,8 +420,184 @@ class CombLlamaPreTrainedModel(PreTrainedModel):
 
         return causal_mask
 
+class CombLlamaTextModel(CombLlamaPreTrainedModel):
+    config_class = CombLlamaTextConfig
+    base_model_prefix = "language_model.model"
+    def __init__(self, config: CombLlamaTextConfig):
+        super().__init__(config)
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+        self.embed_tokens = nn.Embedding(config.vocab_size + 8, config.hidden_size, self.padding_idx)
+        self.cross_attention_layers = config.cross_attention_layers
+
+        layers = []
+        for layer_idx in range(config.num_hidden_layers):
+            if layer_idx in self.cross_attention_layers:
+                layers.append(CombLlamaCrossAttentionDecoderLayer(config, layer_idx))
+            else:
+                layers.append(CombLlamaSelfAttentionDecoderLayer(config, layer_idx))
+
+        self.layers = nn.ModuleList(layers)
+        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+        self.gradient_checkpointing = False
+        self.post_init()
+
+    @replace_return_docstrings(output_type=BaseModelOutputWithPast, config_class="LLamaConfig")
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        cross_attention_states: Optional[torch.FloatTensor] = None,
+        # cross_attention_mask: Optional[torch.Tensor] = None,
+        # full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        """
+
+        Returns:
+
+        Example:
+
+        ```python
+        >>> from transformers import AutoProcessor, MllamaTextModel
+
+        >>> checkpoint = "meta-llama/Llama-3.2-11B-Vision"
+        >>> model = MllamaTextModel.from_pretrained(checkpoint)
+        >>> processor = AutoProcessor.from_pretrained(checkpoint)
+
+        >>> text = "<|image|>If I had to write a haiku for this one"
+        >>> inputs = processor(text=text, return_tensors="pt")
+
+        >>> output = model(**inputs)
+
+        >>> print(output.last_hidden_state.shape)
+        torch.Size([1, 13, 4096])
+        ```
+        """
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if self.gradient_checkpointing and self.training and use_cache:
+            logger.warning_once(
+                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
+            )
+            use_cache = False
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        hidden_states = inputs_embeds
+
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        causal_mask = self._update_causal_mask(
+            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+        )
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = None
+
+        for idx, decoder_layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            # For text-only path we should skip cross attention layers.
+            # Let's check if the layer is cross attention layer and if we have cross attention states
+            # or cached cross attention states.
+            is_cross_attention_layer = idx in self.cross_attention_layers
+            is_cross_attention_cache_empty = past_key_values is None or (
+                past_key_values is not None and past_key_values.get_seq_length(idx) == 0
+            )
+
+            if is_cross_attention_layer and cross_attention_states is None and is_cross_attention_cache_empty:
+                continue
+
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    decoder_layer.__call__,
+                    hidden_states,
+                    cross_attention_states,
+                    # cross_attention_mask,
+                    causal_mask,
+                    # full_text_row_masked_out_mask,
+                    position_ids,
+                    past_key_values,
+                    output_attentions,
+                    use_cache,
+                    cache_position,
+                    position_embeddings,
+                )
+            else:
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    cross_attention_states=cross_attention_states,
+                    # cross_attention_mask=cross_attention_mask,
+                    attention_mask=causal_mask,
+                    # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    position_embeddings=position_embeddings,
+                )
+
+            hidden_states = layer_outputs[0]
+
+            if use_cache:
+                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+        hidden_states = self.norm(hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        next_cache = next_decoder_cache if use_cache else None
+
+        if not return_dict:
+            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
+        )
+
 class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
-    config_class = MllamaTextConfig
+    config_class = LlamaConfig
     _supports_static_cache = True  # only the LLM without cross attn can do compile
     base_model_prefix = "language_model"
     _tied_weights_keys = ["lm_head.weight"]
@@ -211,20 +606,20 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
         super().__init__(config.get_text_config())
         self.text_config = config.get_text_config()
         self.vocab_size = self.text_config.vocab_size
-        self.model = MllamaTextModel._from_config(self.text_config)
+        self.model = CombLlamaTextModel._from_config(self.text_config)
         self.lm_head = nn.Linear(self.text_config.hidden_size, self.vocab_size, bias=False)
 
         self.post_init()
 
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class="MllamaTextConfig")
+    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class="LLamaConfig")
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         cross_attention_states: Optional[torch.LongTensor] = None,
-        cross_attention_mask: Optional[torch.LongTensor] = None,
-        full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        # cross_attention_mask: Optional[torch.LongTensor] = None,
+        # full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -282,8 +677,8 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
             cross_attention_states=cross_attention_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            cross_attention_mask=cross_attention_mask,
-            full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+            # cross_attention_mask=cross_attention_mask,
+            # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,

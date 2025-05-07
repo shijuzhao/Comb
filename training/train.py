@@ -1,7 +1,7 @@
 import torch
 import deepspeed
 from transformers import LLamaConfig, LLamaForCausalLM, AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, dataloader_to_step
 import numpy as np
 import json
 import os
@@ -18,14 +18,25 @@ model = model.to('cuda')
 model_engine, optimizer, _, _ = deepspeed.initialize(
     model=model,
     config_file="ds_config.json",
-    optimizer=AdamW(model.parameters(), lr=1e-5)
+    optimizer=AdamW(model.parameters(), lr=1e-4)
 )
 # initialize the dataset and dataloader
 dataset = XSumDataset()
 data_loader = DataLoader(dataset, batch_size=1, num_workers=os.cpu_count()-1,
                         collate_fn=dataset.collate_fn, shuffle=True)
 loss_history = []
-for epoch in range(num_train_epochs):
+epoch = 0
+# load checkpoint if exists
+if os.path.exists("checkpoints"):
+    _, custom_checkpoint = model_engine.load_checkpoint("checkpoints")
+    step = custom_checkpoint["step"]
+    epoch = custom_checkpoint["epoch"]
+    dataloader_to_step(data_loader, step + 1)
+    model_engine.load_state_dict(custom_checkpoint["model"])
+    optimizer.load_state_dict(custom_checkpoint["optimizer"])
+
+while epoch < num_train_epochs:
+    epoch += 1
     model_engine.train()
     for step, batch in enumerate(data_loader):
         input_ids = batch["input_ids"].to(model_engine.device)
@@ -45,9 +56,15 @@ for epoch in range(num_train_epochs):
                 f.write(f"{epoch},{step},{loss.item()}\n")
             
         if step % 500 == 0:
-            model_engine.save_checkpoint(f"./checkpoints/epoch_{epoch}_step_{step}")
-            model.save_pretrained(f"./checkpoints/epoch_{epoch}_step_{step}")
+            trainable_params = {k: v for k, v in model.state_dict().items() if v.requires_grad}
+            custom_checkpoint = {
+                "model": trainable_params,
+                "optimizer": optimizer.state_dict(),
+                "step": step,
+                "epoch": epoch
+            }
+            model_engine.save_checkpoint(f"./checkpoints/", custom_checkpoint)
 
 # Save the final model
 model_engine.save_checkpoint("./final_checkpoint")
-model.save_pretrained("./final_model")
+model.save_pretrained("../models/final_model")

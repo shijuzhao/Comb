@@ -1,6 +1,6 @@
 {
     "train_batch_size": "auto",
-    "gradient_accumulation_steps": 1,
+    "gradient_accumulation_steps": "auto",
     "bf16": {"enabled": true},
     "optimizer": {
         "type": "AdamW",
@@ -23,5 +23,6 @@
         "job_name": "comb_training"
     },
     "num_train_epochs": 3,
-    "save_steps": 500
+    "save_steps": 500,
+    "autotuning": {"enabled": true}
 }
