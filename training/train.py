@@ -6,14 +6,14 @@ import numpy as np
 import json
 import os
 
-from ..models.CombLlama import CombLlamaConfig, CombLlamaForCausalLM
+from ..models.CombLlama import CombLlamaConfig, CombLlamaForConditionalGeneration
 from ..data.Xsum import XSumDataset
 
 # configs
 num_train_epochs = 3
 model_name = "../models/Llama-3.1-8B-Instruct"
 # initialize the model
-model = CombLlamaForCausalLM.from_pretrained(model_name, config=CombLlamaConfig())
+model = CombLlamaForConditionalGeneration.from_pretrained(model_name, config=CombLlamaConfig())
 model = model.to('cuda')
 model_engine, optimizer, _, _ = deepspeed.initialize(
     model=model,
