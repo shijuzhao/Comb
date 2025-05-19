@@ -11,10 +11,14 @@ class XsumDataset(Dataset):
         self.data = self.data.map(self.preprocess, batched=True)
 
     def preprocess(self, examples):
-        model_inputs = self.tokenizer(examples["document"], max_length=self.max_length,
+        model_inputs = self.tokenizer("You are an AI assistant. "
+                "Read the provided text and produce a concise summary. "
+                "Capture the main points without unnecessary details.")
+        chunks = self.tokenizer(examples["document"], max_length=self.max_length,
                                         truncation=True, padding="max_length")
         labels = self.tokenizer(examples["summary"], max_length=256,
                                         truncation=True, padding="max_length")
+        model_inputs["chunk_ids"] = chunks["input_ids"]
         model_inputs["labels"] = labels["input_ids"]
         return model_inputs
 
@@ -25,14 +29,14 @@ class XsumDataset(Dataset):
         item = self.data[idx]
         return {
             "input_ids": item["input_ids"],
-            "attention_mask": item["attention_mask"],
+            "chunk_ids": item["chunk_ids"],
             "labels": item["labels"]
         }
 
     def collate_fn(self, batch):
         return {
             "input_ids": torch.stack([item["input_ids"] for item in batch]),
-            "attention_mask": torch.stack([item["attention_mask"] for item in batch]),
+            "chunk_ids": torch.stack([item["chunk_ids"] for item in batch]),
             "labels": torch.stack([item["labels"] for item in batch])
         }
 
