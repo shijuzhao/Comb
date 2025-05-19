@@ -1,7 +1,7 @@
 import torch
 import deepspeed
 from transformers import LlamaConfig, LlamaForCausalLM, AdamW
-from torch.utils.data import DataLoader, dataloader_to_step
+from torch.utils.data import DataLoader
 import numpy as np
 import json
 import os
@@ -32,7 +32,12 @@ if os.path.exists("checkpoints"):
     _, custom_checkpoint = model_engine.load_checkpoint("checkpoints")
     step = custom_checkpoint["step"]
     epoch = custom_checkpoint["epoch"]
-    dataloader_to_step(data_loader, step + 1)
+    # advance the dataloader to the checkpoint step
+    for _ in range(step):
+        try:
+            next(iter(data_loader))
+        except StopIteration:
+            break
     model_engine.load_state_dict(custom_checkpoint["model"])
     optimizer.load_state_dict(custom_checkpoint["optimizer"])
 
@@ -41,11 +46,11 @@ while epoch < num_train_epochs:
     model_engine.train()
     for step, batch in enumerate(data_loader):
         input_ids = batch["input_ids"].to(model_engine.device)
-        attention_mask = batch["attention_mask"].to(model_engine.device)
+        chunk_ids = batch["chunk_ids"].to(model_engine.device)
         labels = batch["labels"].to(model_engine.device)
         outputs = model_engine(
             input_ids=input_ids,
-            attention_mask=attention_mask,
+            chunk_ids=chunk_ids,
             labels=labels
         )
         loss = outputs.loss
