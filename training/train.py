@@ -1,6 +1,6 @@
 import torch
 import deepspeed
-from transformers import LLamaConfig, LLamaForCausalLM, AdamW
+from transformers import LlamaConfig, LlamaForCausalLM, AdamW
 from torch.utils.data import DataLoader, dataloader_to_step
 import numpy as np
 import json
@@ -11,9 +11,10 @@ from ..data.Xsum import XSumDataset
 
 # configs
 num_train_epochs = 3
-model_name = "../models/Llama-3.1-8B-Instruct"
+model_name = "meta-llama/Llama-3.1-8B-Instruct"
 # initialize the model
-model = CombLlamaForConditionalGeneration.from_pretrained(model_name, config=CombLlamaConfig())
+model = CombLlamaForConditionalGeneration.from_pretrained(model_name,
+            config=CombLlamaConfig(LlamaConfig.from_pretrained(model_name)))
 model = model.to('cuda')
 model_engine, optimizer, _, _ = deepspeed.initialize(
     model=model,

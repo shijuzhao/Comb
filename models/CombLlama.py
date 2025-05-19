@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from transformers import LLamaConfig, PreTrainedModel, LLamaForCausalLM
+from transformers import LlamaConfig, PreTrainedModel, LlamaForCausalLM
 from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaMLP, \
                         LlamaRoteryEmbedding, LlamaAttention
 from transformers.configuration_utils import PretrainedConfig
@@ -194,7 +194,7 @@ class CrossAttention(nn.Module):
 
     def __init__(
         self,
-        config: Optional[LLamaConfig] = None,
+        config: Optional[LlamaConfig] = None,
         layer_idx: Optional[int] = None,
     ):
         super().__init__()
@@ -563,7 +563,7 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
         self.gradient_checkpointing = False
         self.post_init()
 
-    @replace_return_docstrings(output_type=BaseModelOutputWithPast, config_class="LLamaConfig")
+    @replace_return_docstrings(output_type=BaseModelOutputWithPast, config_class="LlamaConfig")
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -731,7 +731,7 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
 
         self.post_init()
 
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class="LLamaConfig")
+    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class="LlamaConfig")
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
