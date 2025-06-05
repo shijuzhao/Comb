@@ -1,6 +1,5 @@
 {
-    "train_batch_size": "auto",
-    "gradient_accumulation_steps": "auto",
+    "train_batch_size": 8,
     "bf16": {"enabled": true},
     "optimizer": {
         "type": "AdamW",
@@ -13,16 +12,13 @@
         "type": "WarmupLR",
         "params": {
             "warmup_min_lr": 0,
-            "warmup_max_lr": 0.001,
-            "warmup_steps": 1000
+            "warmup_max_lr": 0.001
         }
     },
     "tensorboard": {
         "enabled": true,
-        "log_dir": "./ds_logs",
         "job_name": "comb_training"
     },
     "num_train_epochs": 3,
-    "save_steps": 500,
-    "autotuning": {"enabled": true}
+    "save_steps": 500
 }
