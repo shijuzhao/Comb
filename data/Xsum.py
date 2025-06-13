@@ -14,9 +14,14 @@ class XsumDataset(Dataset):
             self.tokenizer.pad_token_id = 128004
         self.max_length = max_length
         self.data = load_dataset("EdinburghNLP/xsum", split=split)
-        self.data = self.data.map(self.preprocess, batched=True)
+        if split == "train":
+            self.data = self.data.map(self.preprocess_for_train, batched=True)
+        elif split == "test":
+            self.data = self.data.map(self.preprocess_for_test, batched=True)
+        else:
+            raise ValueError("Split must be either 'train' or 'test'.")
 
-    def preprocess(self, examples):
+    def preprocess_for_train(self, examples):
         system_prompt = self.tokenizer("You are an AI assistant. "
                 "Read the provided text and produce a concise summary. "
                 "Capture the main points without unnecessary details."
@@ -40,7 +45,24 @@ class XsumDataset(Dataset):
         return {
             "input_ids": stack(input_ids),
             "chunk_ids": chunks["input_ids"],
+            "cross_attention_mask": chunks["attention_mask"],
             "labels": stack(label_ids)
+        }
+    
+    def preprocess_for_test(self, examples):
+        system_prompt = self.tokenizer("You are an AI assistant. "
+                "Read the provided text and produce a concise summary. "
+                "Capture the main points without unnecessary details."
+                , truncation=False, padding=False, return_tensors="pt")
+        chunks = self.tokenizer(examples["document"], max_length=self.max_length,
+                                            truncation=True, padding="max_length")
+        labels = self.tokenizer(examples["summary"], max_length=256,
+                                            truncation=True, padding="max_length")
+        return {
+            "input_ids": system_prompt["input_ids"].repeat(len(chunks["input_ids"]), 1),
+            "chunk_ids": chunks["input_ids"],
+            "cross_attention_mask": chunks["attention_mask"],
+            "labels": labels["input_ids"]
         }
 
     def __len__(self):
@@ -51,9 +73,8 @@ class XsumDataset(Dataset):
 
     def collate_fn(self, batch):
         return {
-            "input_ids": stack([tensor(item["input_ids"]) for item in batch]),
-            "chunk_ids": stack([tensor(item["chunk_ids"]) for item in batch]),
-            "labels": stack([tensor(item["labels"]) for item in batch])
+            key: stack([tensor(item[key]) for item in batch])
+            for key in ["input_ids", "chunk_ids", "cross_attention_mask", "labels"]
         }
 
 if __name__ == "__main__":

@@ -86,33 +86,6 @@ class CombLlamaConfig(PretrainedConfig):
 
         super().__init__(pad_token_id=pad_token_id, **kwargs)
     
-def _prepare_cross_attention_mask(
-    cross_attention_mask: torch.Tensor,
-    num_chunk_tokens: int,
-    dtype: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    # reshape so it can be used by attn module
-    batch_size, text_total_length, *_ = cross_attention_mask.shape
-    cross_attention_mask = cross_attention_mask.repeat_interleave(num_chunk_tokens, dim=3)
-    cross_attention_mask = cross_attention_mask.view(batch_size, text_total_length, -1)
-    cross_attention_mask = cross_attention_mask.unsqueeze(1)
-
-    # invert the mask
-    inverted_cross_attn_mask = (1.0 - cross_attention_mask).to(dtype)
-    cross_attention_mask = inverted_cross_attn_mask.masked_fill(
-        inverted_cross_attn_mask.to(torch.bool), torch.finfo(dtype).min
-    )
-
-    # apply full-row bias, which return 4D tensor of shape [B, H, S1, 1] where value is 0 if the a full row in cross attn mask's
-    # last dimension contains negative infinity values, otherwise it's 1
-    negative_inf_value = torch.finfo(dtype).min
-    full_text_row_masked_out_mask = (
-        (cross_attention_mask != negative_inf_value).any(dim=-1).type_as(cross_attention_mask)[..., None]
-    )
-    cross_attention_mask *= full_text_row_masked_out_mask
-
-    return cross_attention_mask, full_text_row_masked_out_mask
-    
 # Copied from transformers.models.llama.modeling_llama.repeat_kv
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -163,9 +136,8 @@ class CrossAttention(nn.Module):
 
         if cross_attention_states is not None:
             key_states, value_states = cross_attention_states
-            if past_key_value is not None:
-                # if we have a new chunk + new tokens, we only computed key_states on that new chunk
-                # we still update the cross key states, past_chunk, new_chunk. And use it!
+            if past_key_value is not None and past_key_value.get_seq_length(self.layer_idx) == 0:
+                # if we have a new chunk, we update the cross key states and use it!
                 key_states, value_states = past_key_value.update(
                     key_states, value_states, self.layer_idx, {"cache_position": cache_position}
                 )
@@ -220,7 +192,7 @@ class CombLlamaCrossAttentionDecoderLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         cross_attention_states: torch.Tensor,
         cross_attention_mask: torch.Tensor,
-        full_text_row_masked_out_mask: Tuple[torch.Tensor, torch.Tensor],
+        # full_text_row_masked_out_mask: Tuple[torch.Tensor, torch.Tensor],
         past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
@@ -242,8 +214,8 @@ class CombLlamaCrossAttentionDecoderLayer(torch.nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        if full_text_row_masked_out_mask is not None:
-            hidden_states = full_text_row_masked_out_mask[:, 0] * hidden_states  # type: ignore
+        # if full_text_row_masked_out_mask is not None:
+        #     hidden_states = full_text_row_masked_out_mask[:, 0] * hidden_states  # type: ignore
         hidden_states = residual + self.cross_attn_mlp_gate.tanh() * hidden_states
 
         outputs = (hidden_states,)
@@ -483,7 +455,7 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
         position_ids: Optional[torch.LongTensor] = None,
         cross_attention_states: Optional[List[torch.FloatTensor]] = None,
         cross_attention_mask: Optional[torch.Tensor] = None,
-        full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        # full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
@@ -494,6 +466,11 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         """
         The text backbone of the CombLlama model.
+
+        Returns:
+            `BaseModelOutputWithPast` or `tuple`:
+                A `BaseModelOutputWithPast` if `return_dict=True` is passed or when only the last hidden state is needed, 
+                otherwise a tuple where the first element is the last hidden state and the rest are the outputs of the model.
 
         Example:
 
@@ -574,7 +551,7 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
                     hidden_states,
                     cross_attention_states=cross_attention_states[cross_layer_id] if cross_attention_states else None,
                     cross_attention_mask=cross_attention_mask,
-                    full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+                    # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
@@ -677,7 +654,7 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
         position_ids: Optional[torch.LongTensor] = None,
         cross_attention_states: Optional[List[torch.LongTensor]] = None,
         cross_attention_mask: Optional[torch.LongTensor] = None,
-        full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        # full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -702,6 +679,11 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
                 If a `torch.Tensor`, must be 1D corresponding to the indices to keep in the sequence length dimension.
                 This is useful when using packed tensor format (single dimension for batch and sequence length).
 
+        Returns:
+            `CausalLMOutputWithPast` or `tuple`:
+                A `CausalLMOutputWithPast` if `return_dict=True` is passed or when only the last token logits are needed, 
+                otherwise a tuple where the first element is the last token logits and the rest are the outputs of the model.
+        
         Example:
 
         ```python
@@ -736,7 +718,7 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
             attention_mask=attention_mask,
             position_ids=position_ids,
             cross_attention_mask=cross_attention_mask,
-            full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+            # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
@@ -823,6 +805,7 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
     def get_decoder(self):
         return self.language_model.get_decoder()
 
+    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class="CombLlamaConfig")
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -855,6 +838,12 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
                 If a `torch.Tensor`, must be 1D corresponding to the indices to keep in the sequence length dimension.
                 This is useful when using packed tensor format (single dimension for batch and sequence length).
 
+        Returns:
+            `CausalLMOutputWithPast` or `tuple`:
+                A `CausalLMOutputWithPast` if `return_dict=True` is passed or when `config.use_return_dict=True`,
+                otherwise a tuple where the first element is the language model logits
+                and the rest are the outputs of the language model.
+                
         Example:
 
         ```python
@@ -903,17 +892,16 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
             cross_attention_states = self.chunk_model(chunk_ids)
 
         if cross_attention_mask is not None:
-            cross_attention_mask, full_text_row_masked_out_mask = _prepare_cross_attention_mask(
-                cross_attention_mask,
-                num_chunk_tokens=len(cross_attention_states[0]),
-                dtype=self.dtype,
+            # invert the mask
+            inverted_cross_attn_mask = (1.0 - cross_attention_mask).to(self.dtype)
+            cross_attention_mask = inverted_cross_attn_mask.masked_fill(
+                inverted_cross_attn_mask.to(torch.bool), torch.finfo(self.dtype).min
             )
-        else:
-            full_text_row_masked_out_mask = None
-
-        if cross_attention_mask is not None and cache_position is not None:
-            cross_attention_mask = cross_attention_mask[:, :, cache_position]
-            full_text_row_masked_out_mask = full_text_row_masked_out_mask[:, :, cache_position]
+            
+            # reshape so it can be used by attn module
+            cross_attention_mask = cross_attention_mask.unsqueeze(1).unsqueeze(1)
+        # else:
+        #     full_text_row_masked_out_mask = None
 
         outputs = self.language_model(
             input_ids=input_ids,
@@ -921,7 +909,7 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
             position_ids=position_ids,
             cross_attention_states=cross_attention_states,
             cross_attention_mask=cross_attention_mask,
-            full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+            # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
             inputs_embeds=inputs_embeds,

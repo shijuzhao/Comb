@@ -51,10 +51,12 @@ while epoch < num_train_epochs:
     for step, batch in enumerate(data_loader):
         input_ids = batch["input_ids"].to(model_engine.device)
         chunk_ids = batch["chunk_ids"].to(model_engine.device)
+        cross_attention_mask = batch["cross_attention_mask"].to(model_engine.device)
         labels = batch["labels"].to(model_engine.device)
         outputs = model_engine(
             input_ids=input_ids,
             chunk_ids=chunk_ids,
+            cross_attention_mask=cross_attention_mask,
             labels=labels
         )
         loss = outputs.loss
