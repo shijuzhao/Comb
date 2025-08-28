@@ -1,10 +1,10 @@
 # Local cache files
-training/final_checkpoint
+training/checkpoints
 training/comb_training
 
-# we do not want to host the weights of CombDeepseek on GitHub,
-# because they are too large.
-models/CombDeepseek
+# We do not want to host the weights on GitHub, because they are too large.
+models/CombLlama-10B-Instruct
+models/CombDeepseek-V2-Lite
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
