@@ -1,10 +1,13 @@
 # Local cache files
 training/checkpoints
 training/comb_training
+benchmarks/results
 
 # We do not want to host the weights on GitHub, because they are too large.
-models/CombLlama-10B-Instruct
+models/CombLlama-11B-Instruct
 models/CombDeepseek-V2-Lite
+
+.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

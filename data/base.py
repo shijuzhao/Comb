@@ -4,6 +4,7 @@ This file defines a base class `DatasetBase`.
 It divides the samples into different buckets accordint to their length.
 """
 
+from abc import ABC, abstractmethod
 from datasets import load_from_disk
 import numpy as np
 import os
@@ -17,47 +18,17 @@ from transformers import AutoTokenizer
 BUCKET_SIZE = [0, 256, 512, 1024, 2048, 4096, 8192, 16384]
 # Due to different lengths of the buckets, we adjust the batch size accordingly
 # to prevent Out of Memory (OOM) errors.
-BUCKET_BATCH_SIZE = [8, 8, 8, 8, 4, 2, 1]
+BUCKET_BATCH_SIZE = [8, 8, 8, 4, 4, 1, 1]
 KEYS_FOR_TRAIN = ["input_ids", "chunk_ids", "cross_attention_mask", "labels"]
 CPU_NUM = os.cpu_count()
 HF_HOME = os.getenv('HF_HOME', '~/.cache/huggingface')
 CACHE_DIR = HF_HOME + '/bucket_cache'
-
-# def assign_bucket(example):
-#     for i, s in enumerate(BUCKET_SIZE):
-#         if 0 < example['token_count'] <= s:
-#             return {'bucket': i}
-#     # drop extra-long samples
-#     return {'bucket': None}
+NUM_INSTANCES_PER_FILE = 1 << 20
 
 def collate_fn(batch):
     return {
         key: stack([tensor(item[key]) for item in batch]) for key in KEYS_FOR_TRAIN
     }
-
-# def pad_tokens(batch, chunk_length, input_length, label_column, pad_token_id=128004):
-#     input_ids = []
-#     labels = []
-#     for input_id, label in zip(batch['input_ids'], batch[label_column]):
-#         l = len(input_id)
-#         # concatenate input and label
-#         input_id += label
-#         label = [-100] * (l - 1) + label
-#         # truncate
-#         input_id = input_id[:input_length]
-#         label = label[:input_length]
-#         # pad
-#         input_ids.append(input_id + [pad_token_id]*(input_length-len(input_id)))
-#         labels.append(label + [-100]*(input_length-len(label)))
-
-#     return {
-#         'input_ids': input_ids,
-#         'chunk_ids': [chunk_ids + [pad_token_id]*(chunk_length-len(chunk_ids))
-#             for chunk_ids in batch['chunk_ids']],
-#         'cross_attention_mask': [mask + [0]*(chunk_length-len(mask))
-#             for mask in batch['cross_attention_mask']],
-#         'labels': labels
-#     }
 
 def pad_tokens(example, chunk_length, input_length, label_column, pad_token_id=128004):
     input_id = example['input_ids']
@@ -79,7 +50,7 @@ def pad_tokens(example, chunk_length, input_length, label_column, pad_token_id=1
         np.pad(label, (0, input_length-len(label)), constant_values=-100)
     ], index=KEYS_FOR_TRAIN)
 
-class DatasetBase:
+class DatasetBase(ABC):
     def __init__(self, model_name, split="train", max_input_length=512):
         self.model_name = model_name
         self.max_input_length = max_input_length
@@ -91,6 +62,7 @@ class DatasetBase:
         else:
             self._init_data(split)
 
+    @abstractmethod
     def _init_data(self, split):
         raise NotImplementedError("Tokenization must be implemented.")
         
@@ -108,49 +80,50 @@ class DatasetBase:
         return self.data[idx]
 
     def bucketing(self, local_rank, world_size):
-        # self.data = self.data.map(assign_bucket)
-        # grouped_dataloader = []
-        # for i, bsz in enumerate(BUCKET_BATCH_SIZE):
-        #     filtered_data = self.data.filter(lambda x: x['bucket'] == i)
-        #     if len(filtered_data) > 0:
-        #         max_length = max(filtered_data['token_count'])
-        #         padded_data = filtered_data.map(pad_tokens, batched=True,
-        #                         fn_kwargs={'chunk_length': max_length,
-        #                         'input_length': self.max_input_length,
-        #                         'pad_token_id': self.tokenizer.pad_token_id})
-        #         grouped_dataloader.append((bsz, 
-        #             DataLoader(padded_data, batch_size=bsz, collate_fn=collate_fn,
-        #                         shuffle=True, num_workers=CPU_NUM)
-        #         ))
-        
-        # return grouped_dataloader
-        bucket_files = [os.path.join(CACHE_DIR, f"bucket_{i}.parquet")
-                        for i in range(len(BUCKET_BATCH_SIZE))]
-        # Only one process handles the dataset
+        num_files = 0
+        # Only one rank handles the dataset
         if local_rank == 0 or world_size == 1:
+            bucket_files = []
             os.makedirs(CACHE_DIR, exist_ok=True)
-            # Delete cache
-            for file in bucket_files:
-                if os.path.exists(file):
-                    os.remove(file)
-
             df = self.data if isinstance(self.data, pd.DataFrame) else self.data.to_pandas()
             df['bucket'] = pd.cut(df['token_count'], bins=BUCKET_SIZE,
                                 labels=range(len(BUCKET_SIZE) - 1), ordered=False)
             label_column = self.model_name if self.model_name in df else 'labels'
             for i, group_df in df.groupby('bucket', observed=True):
-                max_length = group_df['token_count'].max()
-                padded_df = group_df.apply(pad_tokens, axis=1, result_type='expand',
-                                        args=(max_length, self.max_input_length,
-                                        label_column, self.tokenizer.pad_token_id))
-                padded_df.to_parquet(bucket_files[i], index=False)
+                bsz = BUCKET_BATCH_SIZE[i]
+                # Shuffle
+                group_df = group_df.sample(frac=1, random_state=42)
+                # Divide the DataFrame if it is too large
+                for start in range(0, len(group_df), NUM_INSTANCES_PER_FILE):
+                    cache_file = os.path.join(CACHE_DIR, f"bucket_{num_files}.parquet")
+                    num_files += 1
+
+                    # Delete cache
+                    if os.path.exists(cache_file):
+                        os.remove(cache_file)
+
+                    df = group_df.iloc[start: start + NUM_INSTANCES_PER_FILE]
+                    max_length = df['token_count'].max()
+                    df = df.apply(pad_tokens, axis=1, result_type='expand',
+                                            args=(max_length, self.max_input_length,
+                                            label_column, self.tokenizer.pad_token_id))
+                    df.to_parquet(cache_file, index=False)
+                    bucket_files.append((bsz, cache_file))
 
         # Synchronize
         if world_size > 1:
-            torch.distributed.barrier()
+            # First broadcast the number of files
+            n = tensor(num_files, dtype=torch.long, device='cuda')
+            torch.distributed.broadcast(n, src=0)
+            if local_rank != 0:
+                bucket_files = [None] * n.item()
+
+            # Then broadcast the file list
+            torch.distributed.broadcast_object_list(bucket_files, src=0)
         
-        return zip(BUCKET_BATCH_SIZE, bucket_files)
+        return bucket_files
     
+    @classmethod
     def scorer(self, example, method):
         score = 0.
         prediction = example[f'output_{method}']

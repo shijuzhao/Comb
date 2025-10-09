@@ -15,4 +15,4 @@ cd vllm_v0.10.0
 VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 ```
 
-Download parameters (the parameters of `CombLlama-10B-Instruct` and `CombDeepSeek-V2-Lite` will be soon available on huggingface). You can also train a Comb model by yourself through following our [instructions](training/README.md).
+Download the parameters of `CombLlama-11B-Instruct` from huggingface [link]. You can also train a Comb model by yourself through following our [instructions](training/README.md).

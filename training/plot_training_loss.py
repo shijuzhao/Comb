@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 loss = np.loadtxt('training_loss.csv', delimiter=',', usecols=[1, 2])
 num_ranks = 0
-while loss[num_ranks][0] == 99:
+while loss[num_ranks][0] == loss[0][0]:
     num_ranks += 1
 
 loss = loss[:, 1]

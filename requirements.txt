@@ -3,6 +3,7 @@ deepspeed==0.17.2
 huggingface_hub==0.31.2
 matplotlib==3.7.5
 numpy==2.3.1
+rouge==1.0.1
 safetensors==0.5.3
 torch==2.7.1+cu128
 tqdm==4.67.1

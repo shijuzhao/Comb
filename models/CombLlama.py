@@ -14,7 +14,7 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaMLP, \
-            LlamaRotaryEmbedding, LlamaDecoderLayer, eager_attention_forward, rotate_half
+            LlamaAttention, LlamaRotaryEmbedding, LlamaDecoderLayer, eager_attention_forward
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, \
             can_return_tuple, is_torch_flex_attn_available, logging
@@ -137,7 +137,6 @@ class CrossAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x SeqLen x HiddenSize"""
@@ -146,9 +145,6 @@ class CrossAttention(nn.Module):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         query_states = self.q_norm(query_states)
 
-        cos, sin = position_embeddings
-        cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-        query_states = (query_states * cos) + (rotate_half(query_states) * sin)
         if cross_attention_states is not None:
             key_states, value_states = cross_attention_states
             key_states = self.k_norm(key_states)
@@ -220,9 +216,7 @@ class CombLlamaCrossAttentionDecoderLayer(torch.nn.Module):
         # full_text_row_masked_out_mask: Tuple[torch.Tensor, torch.Tensor],
         past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor]:
         residual = hidden_states
@@ -235,7 +229,6 @@ class CombLlamaCrossAttentionDecoderLayer(torch.nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,
             **kwargs,
         )
         hidden_states = residual + self.cross_attn_attn_gate.tanh() * hidden_states
@@ -420,15 +413,17 @@ class CombLlamaChunkModel(CombLlamaPreTrainedModel):
     base_model_prefix = "chunk_model"
 
     def __init__(self, config: CombLlamaConfig):
-        text_config = config.get_text_config()
-        super().__init__(text_config)
-        self.hidden_size = text_config.hidden_size
         self.num_cross_layers = len(config.cross_attention_layers)
-        self.head_dim = self.hidden_size // text_config.num_attention_heads
-        self.num_key_value_heads = text_config.num_key_value_heads
-        self.num_key_value_groups = text_config.num_attention_heads // self.num_key_value_heads
-        self.embed_tokens = nn.Embedding(text_config.vocab_size, self.hidden_size, text_config.pad_token_id)
-        self.rotary_emb = LlamaRotaryEmbedding(config=text_config)
+        config = config.get_text_config()
+        super().__init__(config)
+        self.hidden_size = config.hidden_size
+        self.head_dim = self.hidden_size // config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = config.num_attention_heads // self.num_key_value_heads
+        self.embed_tokens = nn.Embedding(config.vocab_size, self.hidden_size, config.pad_token_id)
+        self.self_attn = LlamaAttention(config=config, layer_idx=-1)
+        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+        self.input_layernorm = LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
                             for _ in range(self.num_cross_layers)])
         self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
@@ -441,18 +436,26 @@ class CombLlamaChunkModel(CombLlamaPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
     ):
         bsz, l = chunk_ids.shape
-        chunk_embeds = self.embed_tokens(chunk_ids)
+        hidden_states = self.embed_tokens(chunk_ids)
         position_ids = torch.arange(l, device=chunk_ids.device).unsqueeze(0)
-        cos, sin = self.rotary_emb(chunk_embeds, position_ids)
-        cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        # Self Attention
+        hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+        )
+        hidden_states = residual + hidden_states
         cross_attention_states = []
         for i in range(self.num_cross_layers):
-            key_states = self.k_proj[i](chunk_embeds)
-            value_states = self.v_proj[i](chunk_embeds)
+            key_states = self.k_proj[i](hidden_states)
+            value_states = self.v_proj[i](hidden_states)
             key_states = key_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-            # RoPE
-            key_states = (key_states * cos) + (rotate_half(key_states) * sin)
             cross_attention_states.append((key_states, value_states))
 
         return cross_attention_states
@@ -603,16 +606,14 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
                     # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
-                    use_cache=use_cache,
                     cache_position=cache_position,
-                    position_embeddings=position_embeddings,
                     **kwargs,
                 )
                 hidden_states = layer_outputs[0]
             
             # Next, we compute the self attention layer.
             if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
+                hidden_states = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
                     causal_mask,
@@ -624,7 +625,7 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
                     position_embeddings,
                 )
             else:
-                layer_outputs = decoder_layer(
+                hidden_states = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
@@ -634,8 +635,6 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
                     position_embeddings=position_embeddings,
                     **kwargs,
                 )
-
-            hidden_states = layer_outputs
 
         hidden_states = self.norm(hidden_states)
 
@@ -792,26 +791,15 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
         if from_scratch:
             self.language_model = CombLlamaForCausalLM.from_pretrained(
                 "meta-llama/Llama-3.1-8B-Instruct", config=config)
-            # init weights for new modules
+            # Init weights for embedding
             self.chunk_model.embed_tokens.load_state_dict(
                 self.language_model.model.embed_tokens.state_dict())
-            for i, layer_idx in enumerate(config.cross_attention_layers):
-                self.chunk_model.k_proj[i].load_state_dict(
-                    self.language_model.model.layers[layer_idx].self_attn.k_proj.state_dict())
-                self.chunk_model.v_proj[i].load_state_dict(
-                    self.language_model.model.layers[layer_idx].self_attn.v_proj.state_dict())
-                self.language_model.model.cross_layers[i].cross_attn.q_proj.load_state_dict(
-                    self.language_model.model.layers[layer_idx].self_attn.q_proj.state_dict())
-                self.language_model.model.cross_layers[i].cross_attn.o_proj.load_state_dict(
-                    self.language_model.model.layers[layer_idx].self_attn.o_proj.state_dict())
-                self.language_model.model.cross_layers[i].mlp.load_state_dict(
-                    self.language_model.model.layers[layer_idx].mlp.state_dict())
-            # freeze the original model parameters
+            # Freeze the original model parameters
             for param in self.language_model.parameters():
                 param.requires_grad = False
             for param in self.chunk_model.embed_tokens.parameters():
                 param.requires_grad = False
-            # unfreeze the cross attention layers
+            # Unfreeze the cross attention layers
             for param in self.language_model.model.cross_layers.parameters():
                 param.requires_grad = True
     

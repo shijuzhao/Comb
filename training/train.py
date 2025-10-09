@@ -1,10 +1,10 @@
 """This script trains a CombLlama model using DeepSpeed."""
 
 from datasets import Dataset
+import datetime
 import deepspeed
 from transformers import LlamaConfig
 import torch
-from torch.optim import AdamW
 from torch.utils.data import DataLoader
 import os
 import json
@@ -20,12 +20,12 @@ model = CombLlamaForConditionalGeneration(from_scratch=True,
 world_size = int(os.getenv('WORLD_SIZE', '1'))
 local_rank = int(os.getenv('LOCAL_RANK', '0'))
 device = torch.device(f'cuda:{local_rank}')
-model.to(device)
+# The time for preprocessing datasets may be long, so we extend the time limit.
+deepspeed.init_distributed(timeout=datetime.timedelta(seconds=7200))
 ds_config = json.load(open("ds_config.json"))
 model_engine, optimizer, _, _ = deepspeed.initialize(
     model=model,
-    config=ds_config,
-    optimizer=AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
+    config=ds_config
 )
 model_engine.train()
 global_steps = 0
@@ -49,20 +49,17 @@ for dataset in TRAIN_DATASETS:
     ds = DATASET_DICT[dataset](model_name, split="train")
     # Divide the dataset based on the length of context
     for bsz, file in ds.bucketing(local_rank, world_size):
-        if not os.path.exists(file):
-            continue
-
         data_loader = DataLoader(
             Dataset.from_parquet(file),
             collate_fn=collate_fn,
             batch_size=bsz,
-            shuffle=True,
-            num_workers=CPU_NUM // world_size,
+            shuffle=False, # We have already shuffled in `ds.bucketing()`
+            num_workers=max(CPU_NUM // world_size, 1),
             drop_last=False
         )
         # The micro batch size of dataloaders is different,
         # so we accumulate the gradients accordingly.
-        gc_step = ds_config["train_batch_size"] // world_size //  \
+        gc_step = ds_config["train_batch_size"] // model_engine.dp_world_size //  \
                 ds_config["gradient_accumulation_steps"] // bsz
         for step, batch in enumerate(data_loader):
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -76,7 +73,17 @@ for dataset in TRAIN_DATASETS:
                     with open("training_loss.csv", "a") as f:
                         f.write(f"{dataset},{step},{loss.item()}\n")
 
-    model_engine.step()
-    model_engine.save_checkpoint("checkpoints/CombLlama-10B-Instruct",
-                dataset, client_state={"dataset_name": dataset, "step": global_steps})
-    model.save_pretrained(f"../models/CombLlama-10B-Instruct({dataset})")
+        model_engine.step()
+        # Save checkpoint and parameters
+        model_engine.eval()
+        with deepspeed.zero.GatheredParameters(model_engine.module.parameters(),
+                                            modifier_rank=0):
+            if local_rank == 0:
+                output_dir = f"/data3/junhaohu/model/CombLlama-11B-Instruct({loss.item()})"
+                model_engine.module.save_pretrained(output_dir)
+
+        torch.distributed.barrier(device_ids=[local_rank])
+        model_engine.train()
+
+    model_engine.save_checkpoint("/data3/junhaohu/checkpoints/CombLlama-11B-Instruct",
+            dataset, client_state={"dataset_name": dataset, "step": global_steps})

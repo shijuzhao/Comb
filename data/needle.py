@@ -5,9 +5,11 @@ import numpy as np
 import os
 
 from data.LongBench import BenchmarkDataset
+from data.metrics import qa_f1_score
 
 class NeedleDataset(BenchmarkDataset):
     name = "Needle-in-a-haystack"
+    metric = qa_f1_score
     instruction = ("Answer the question based on the given passages. "
         "Only give me the answer and do not output any other words.\n\nQuestion: ")
     def _init_data(self, split):
@@ -26,12 +28,14 @@ class NeedleDataset(BenchmarkDataset):
         :param document_depth_percent_intervals: The number of intervals for the document depth percent. Default is 10.
         """
         retrieval_question = 'What is the best thing to do in San Francisco?'
-        answer = 'eat a sandwich and sit in Dolores Park on a sunny day.'
+        answers = ['eat a sandwich and sit in Dolores Park on a sunny day.',
+                    'The best thing to do in San Francisco is to eat a sandwich' \
+                    ' and sit in Dolores Park on a sunny day.']
         self.haystack_dir = "PaulGrahamEssays"
         self.needle = 'The best thing to do in San Francisco is to eat a sandwich and sit in Dolores Park on a sunny day.'
         self.final_context_length_buffer = 100
-        self.context_lengths_min = 1000
-        self.context_lengths_max = 10000
+        self.context_lengths_min = 2000
+        self.context_lengths_max = 20000
         self.context_lengths_num_intervals = 10
         self.document_depth_percent_min = 0
         self.document_depth_percent_max = 100
@@ -54,7 +58,7 @@ class NeedleDataset(BenchmarkDataset):
                         for depth_percent in self.document_depth_percents],
             'input': [retrieval_question for _ in self.context_lengths
                         for _ in self.document_depth_percents],
-            'answers': [[answer] for _ in self.context_lengths
+            'answers': [answers for _ in self.context_lengths
                         for _ in self.document_depth_percents],
             'context_length': [context_length for context_length in self.context_lengths
                         for _ in self.document_depth_percents],
