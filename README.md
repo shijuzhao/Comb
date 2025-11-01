@@ -11,7 +11,7 @@ pip install -r requirements.txt
 
 Install vllm.
 ```bash
-cd vllm_v0.10.0
+cd vllm_v0.11.0
 VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 ```
 

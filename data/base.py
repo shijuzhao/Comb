@@ -19,7 +19,7 @@ BUCKET_SIZE = [0, 256, 512, 1024, 2048, 4096, 8192, 16384]
 # Due to different lengths of the buckets, we adjust the batch size accordingly
 # to prevent Out of Memory (OOM) errors.
 BUCKET_BATCH_SIZE = [8, 8, 8, 4, 4, 1, 1]
-KEYS_FOR_TRAIN = ["input_ids", "chunk_ids", "cross_attention_mask", "labels"]
+KEYS_FOR_TRAIN = ["input_ids", "chunk_ids", "cross_attention_mask", "shift_labels"]
 CPU_NUM = os.cpu_count()
 HF_HOME = os.getenv('HF_HOME', '~/.cache/huggingface')
 CACHE_DIR = HF_HOME + '/bucket_cache'
@@ -38,6 +38,7 @@ def pad_tokens(example, chunk_length, input_length, label_column, pad_token_id=1
     # Concatenate input and label
     l = len(input_id)
     input_id = np.concatenate([input_id, label])
+    # NOTE: Here we manually shift the labels.
     label = np.pad(label, (l - 1, 0), constant_values=-100)
     # Truncate
     input_id = input_id[:input_length]

@@ -14,7 +14,7 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaMLP, \
-            LlamaAttention, LlamaRotaryEmbedding, LlamaDecoderLayer, eager_attention_forward
+            LlamaRotaryEmbedding, LlamaDecoderLayer, eager_attention_forward
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, \
             can_return_tuple, is_torch_flex_attn_available, logging
@@ -421,13 +421,17 @@ class CombLlamaChunkModel(CombLlamaPreTrainedModel):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = config.num_attention_heads // self.num_key_value_heads
         self.embed_tokens = nn.Embedding(config.vocab_size, self.hidden_size, config.pad_token_id)
-        self.self_attn = LlamaAttention(config=config, layer_idx=-1)
+        self.layers = nn.ModuleList([LlamaDecoderLayer(config, layer_idx)
+                                for layer_idx in range(self.num_cross_layers)])
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
-        self.input_layernorm = LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
-        self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
-                            for _ in range(self.num_cross_layers)])
-        self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
-                            for _ in range(self.num_cross_layers)])
+        self.k_proj = nn.ModuleList([
+            nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+                for _ in range(self.num_cross_layers)
+        ])
+        self.v_proj = nn.ModuleList([
+            nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+                for _ in range(self.num_cross_layers)
+        ])
         self.post_init()
 
     def forward(
@@ -440,20 +444,15 @@ class CombLlamaChunkModel(CombLlamaPreTrainedModel):
         position_ids = torch.arange(l, device=chunk_ids.device).unsqueeze(0)
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        # Self Attention
-        hidden_states, _ = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            position_embeddings=position_embeddings,
-        )
-        hidden_states = residual + hidden_states
         cross_attention_states = []
-        for i in range(self.num_cross_layers):
-            key_states = self.k_proj[i](hidden_states)
-            value_states = self.v_proj[i](hidden_states)
+        for idx, decoder_layer in enumerate(self.layers):
+            hidden_states = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_embeddings=position_embeddings
+            )
+            key_states = self.k_proj[idx](hidden_states)
+            value_states = self.v_proj[idx](hidden_states)
             key_states = key_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             cross_attention_states.append((key_states, value_states))
@@ -686,6 +685,7 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        shift_labels: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, CausalLMOutputWithPast]:
         r"""
@@ -714,6 +714,9 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
                 If a `torch.Tensor`, must be 1D corresponding to the indices to keep in the sequence length dimension.
                 This is useful when using packed tensor format (single dimension for batch and sequence length).
 
+            shift_labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Shifted labels so that tokens < n predict n.
+                
         Returns:
             `CausalLMOutputWithPast`.
         
@@ -760,13 +763,14 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
             **kwargs,
         )
 
-        hidden_states = outputs[0]
+        hidden_states = outputs.last_hidden_state
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :]).float()
 
         loss = None
-        if labels is not None:
-            loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
+        if labels is not None or shift_labels is not None:
+            loss = self.loss_function(logits, labels, self.vocab_size,
+                                    shift_labels=shift_labels, **kwargs)
 
         return CausalLMOutputWithPast(
             loss=loss,
@@ -833,6 +837,7 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
         output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        shift_labels: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -865,6 +870,9 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
                 token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
                 If a `torch.Tensor`, must be 1D corresponding to the indices to keep in the sequence length dimension.
                 This is useful when using packed tensor format (single dimension for batch and sequence length).
+
+            shift_labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Shifted labels so that tokens < n predict n.
 
         Returns:
             `CausalLMOutputWithPast`.
@@ -946,14 +954,15 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
 
         # Temporary fix to calculate the loss in main class, as the model's vocab size may be resized
         loss = None
-        logits = outputs[0]
+        logits = outputs.logits
 
-        if labels is not None:
-            loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
+        if labels is not None or shift_labels is not None:
+            loss = self.loss_function(logits, labels, self.vocab_size,
+                                    shift_labels=shift_labels, **kwargs)
 
         return CausalLMOutputWithPast(
             loss=loss,
-            logits=outputs.logits,
+            logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
         )
@@ -962,4 +971,3 @@ if __name__ == "__main__":
     model_name = "meta-llama/Llama-3.1-8B-Instruct"
     model = CombLlamaForConditionalGeneration(from_scratch=True,
                 config=CombLlamaConfig(LlamaConfig.from_pretrained(model_name)))
-    model = model.to('cuda')

@@ -15,7 +15,7 @@ python data/distill_data.py
 
 ## Adjust batch size
 
-To prevent Out of Memory (OOM) errors, the batch size of dataset should be specified. We divide the dataset into buckets based on the length of the context. This helps in efficient batching during training. So you should adjust `BUCKET_BATCH_SIZE` in `data/base.py` according to hardware constraints. For example, the default value is for training `CombLlama-10B-Instruct` with A100 80GB GPU.
+To prevent Out of Memory (OOM) errors, the batch size of dataset should be specified. We divide the dataset into buckets based on the length of the context. This helps in efficient batching during training. So you should adjust `BUCKET_BATCH_SIZE` in `data/base.py` according to hardware constraints. For example, the default value is for training `CombLlama-11B-Instruct` with A100 80GB GPU.
 
 ## Launch
 
