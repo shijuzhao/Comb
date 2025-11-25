@@ -9,7 +9,7 @@ class PICAllocator:
     def __init__(
         self,
         total_slots: int,
-    ):
+    ) -> None:
         self.total_slots = total_slots
         self.cached_pic = OrderedDict()
         self.reset()
@@ -38,10 +38,10 @@ class PICAllocator:
     def register(
         self,
         pic_info: PICInfo,
-    ):
+    ) -> None:
         self.cached_pic[pic_info.chunk_hash] = pic_info
 
-    def reset(self):
+    def reset(self) -> None:
         self.free_slots = deque(CachePosition(0, self.total_slots))
         self.num_free_slots = self.total_slots
         self.cached_pic.clear()
@@ -49,7 +49,7 @@ class PICAllocator:
     def touch(
         self,
         chunk_hash: ChunkHash,
-    ):
+    ) -> None:
         self.cached_pic.move_to_end(chunk_hash)
 
     def preempt(

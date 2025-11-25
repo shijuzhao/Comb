@@ -15,7 +15,7 @@ CONFIG_MAPPING = {
 class CachePosition:
     """The position of PIC in the memory.
     
-    For efficiency, we only record the left and right point of the position.
+    For efficiency, we only record the left and right points of the position.
     Each slot is allocated for 1 token's KV cache.
     """
     # Left point
@@ -55,11 +55,6 @@ class PICInfo:
     cache_positions: list[CachePosition] = []
     # Hash value of the chunk
     chunk_hash: ChunkHash
-    def incr_ref(self):
-        self.ref_cnt += 1
-
-    def decr_ref(self):
-        self.ref_cnt -= 1
 
     def __repr__(self) -> str:
         return (f"PICInfo(rank={self.rank}, "
@@ -102,7 +97,7 @@ class PICSpec:
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         """The shape of PIC for one layer."""
-        return torch.Size(num_tokens, 2, self.num_key_value_heads, self.head_dim)
+        return torch.Size(2, num_tokens, self.num_key_value_heads, self.head_dim)
 
     @property
     def size(self) -> int:
@@ -119,7 +114,8 @@ def merge_position(cp: list[CachePosition]) -> list[CachePosition]:
     """Merge the cache positions if they are continuous."""
     cp.sort()
     merged_cp = [cp.pop()]
-    while cp_new := cp.pop():
+    while cp:
+        cp_new = cp.pop()
         if merged_cp[-1].right == cp_new.left:
             # If the positions are adjacent, merge them.
             merged_cp[-1].right = cp_new.right

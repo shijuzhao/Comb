@@ -22,7 +22,7 @@ local_rank = int(os.getenv('LOCAL_RANK', '0'))
 device = torch.device(f'cuda:{local_rank}')
 # The time for preprocessing datasets may be long, so we extend the time limit.
 deepspeed.init_distributed(timeout=datetime.timedelta(seconds=7200))
-ds_config = json.load(open("ds_config.json"))
+ds_config = json.load(open("ds_llama_config.json"))
 model_engine, optimizer, _, _ = deepspeed.initialize(
     model=model,
     config=ds_config
@@ -79,11 +79,11 @@ for dataset in TRAIN_DATASETS:
         with deepspeed.zero.GatheredParameters(model_engine.module.parameters(),
                                             modifier_rank=0):
             if local_rank == 0:
-                output_dir = f"/data3/junhaohu/model/CombLlama-11B-Instruct({loss.item()})"
+                output_dir = f"../model/CombLlama-11B-Instruct({loss.item()})"
                 model_engine.module.save_pretrained(output_dir)
 
         torch.distributed.barrier(device_ids=[local_rank])
         model_engine.train()
 
-    model_engine.save_checkpoint("/data3/junhaohu/checkpoints/CombLlama-11B-Instruct",
+    model_engine.save_checkpoint("checkpoints/CombLlama-11B-Instruct",
             dataset, client_state={"dataset_name": dataset, "step": global_steps})
