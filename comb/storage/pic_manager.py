@@ -1,7 +1,8 @@
+import gc
 import logging
 import time
 import torch
-from typing import Optional, Union
+from typing import Optional
 
 from comb.storage.chunk_processor import ChunkProcessor
 from comb.storage.pic_allocator import PICAllocator
@@ -25,11 +26,13 @@ class PICManager:
         self.max_context_len = max(self.total_slots.values())
         self.allocators = [PICAllocator(self.total_slots[rank])
                                     for rank in range(num_workers)]
+        self.copy_streams = [torch.cuda.Stream(device=f"cuda:{rank}")
+                                    for rank in range(num_workers)]
         self.reset()
 
     def exists(
         self,
-        tokens: Union[torch.Tensor, list[int]],
+        tokens: list[int],
     ) -> bool:
         chunk_hash = hash_tokens(tokens)
         return chunk_hash in self.cached_hash_to_picinfo
@@ -46,39 +49,42 @@ class PICManager:
 
     def fetch(
         self,
-        tokens: Union[torch.Tensor, list[int]],
+        tokens: list[int],
+        need_store: bool = True,
         pin_memory: bool = False,
     ) -> tuple[int, list[torch.Tensor], ChunkHash]:
         chunk_hash = hash_tokens(tokens)
         if chunk_hash in self.cached_hash_to_picinfo:
             pic_info = self.cached_hash_to_picinfo[chunk_hash]
-            pic_info.ref_cnt += 1
+            rank = pic_info.rank
+            if need_store:
+                pic_info.ref_cnt += 1
             if pin_memory:
                 pic_info.pin_cnt += 1
-            self.allocators[pic_info.rank].touch(chunk_hash)
-            cross_attention_states = self._get_tensor(pic_info.rank,
-                                            pic_info.cache_positions)
+            self.allocators[rank].touch(chunk_hash)
+            cross_attention_states = self._get_tensor(rank, pic_info.cache_positions)
         else:
             # Allocate cache positions.
             rank = self.schedule(len(tokens))
-            cache_positions = self.allocators[rank].allocate(len(tokens))
-            pic_info = PICInfo(
-                rank=rank,
-                ref_cnt=1,
-                pin_cnt=1 if pin_memory else 0,
-                cache_positions=cache_positions,
-                chunk_hash=chunk_hash,
-            )
-            self.cached_hash_to_picinfo[chunk_hash] = pic_info
-            self.allocators[rank].register(pic_info)
             # TODO(Optimize): Overlap with CPU operations.
             # Compute the cross-attention states.
             cross_attention_states = self.chunk_processor[rank].process(tokens)
-            self.store(rank, cache_positions, cross_attention_states)
+            if need_store:
+                cache_positions = self.allocators[rank].allocate(len(tokens))
+                pic_info = PICInfo(
+                    rank=rank,
+                    ref_cnt=1,
+                    pin_cnt=1 if pin_memory else 0,
+                    cache_positions=cache_positions,
+                    chunk_hash=chunk_hash,
+                )
+                self.cached_hash_to_picinfo[chunk_hash] = pic_info
+                self.allocators[rank].register(pic_info)
+                self.store(rank, cache_positions, cross_attention_states)
 
-        return pic_info.rank, cross_attention_states, chunk_hash
+        return rank, cross_attention_states, chunk_hash
 
-    def reset() -> None:
+    def reset(self) -> None:
         self.cached_hash_to_picinfo: dict[ChunkHash, PICInfo] = {}
         self.next_rank = -1
         for allocator in self.allocators:
@@ -101,6 +107,8 @@ class PICManager:
 
         # Wait until enough space is free.
         # NOTE: Maybe we need a request queue and implement complicated scheduler.
+        # But for now, we do not consider this because it is rare that 
+        # no space is available for a request.
         while True:
             time.sleep(0.1)
             for rank in available_workers:
@@ -113,14 +121,17 @@ class PICManager:
         cache_positions: list[CachePosition],
         cross_attention_states: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
-        indices = torch.cat([cp.to_range(rank) for cp in cache_positions], dim=0)
-        for i, pic in enumerate(self.pic[rank]):
-            pic[0, indices] = cross_attention_states[i][0]
-            pic[1, indices] = cross_attention_states[i][1]
+        # TODO(OPTIMIZE): Maybe we need a new thread for each rank.
+        # `Copy` operation can be parallelized.
+        with torch.cuda.stream(self.copy_streams[rank]):
+            indices = torch.cat([cp.to_range(rank) for cp in cache_positions], dim=0)
+            for i, pic in enumerate(self.pic[rank]):
+                pic[0, :, :, indices].copy_(cross_attention_states[i][0])
+                pic[1, :, :, indices].copy_(cross_attention_states[i][1])
 
     def unpin(
         self,
-        tokens: Union[torch.Tensor, list[int]],
+        tokens: list[int],
     ) -> None:
         chunk_hash = hash_tokens(tokens)
         assert chunk_hash in self.cached_hash_to_picinfo, \
@@ -149,14 +160,17 @@ class PICManager:
         rank: int,
         cache_positions: list[CachePosition],
     ) -> list[torch.Tensor]:
-        indices = torch.cat([cp.to_range(rank) for cp in cache_positions], dim=0)
-        return [(pt[0, indices], pt[1, indices]) for pt in self.pic[rank]]
+        with torch.cuda.stream(self.copy_streams[rank]):
+            indices = torch.cat([cp.to_range(rank) for cp in cache_positions], dim=0)
+            return [(pt[0, :, :, indices], pt[1, :, :, indices]) for pt in self.pic[rank]]
 
     def _initialize_pic(
         self,
         pic_spec: PICSpec,
         memory_utilization: float = 0.6,
     ) -> list[torch.Tensor]:
+        logger.info("Reserving space for PIC...")
+        GiB_bytes = 1 << 30
         for rank in range(self.num_workers):
             device = torch.device(f"cuda:{rank}")
             torch.cuda.set_device(device)
@@ -174,10 +188,12 @@ class PICManager:
                     f"GPU memory utilization or reduce GPU memory used by other processes."
                 )
 
-            self.total_slots[rank] = int(required_memory // pic_spec.size)
+            total_slots = int(required_memory // pic_spec.size)
+            logger.info(f"Rank {rank}'s capacity is {total_slots} tokens.")
+            self.total_slots[rank] = total_slots
             self.pic[rank] = [
                 torch.empty(
-                    pic_spec.get_shape(self.total_slots[rank]),
+                    pic_spec.get_shape(total_slots),
                     dtype=pic_spec.dtype,
                     device=device
                 ) for _ in range(pic_spec.num_layers)

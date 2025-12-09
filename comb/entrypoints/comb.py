@@ -1,11 +1,12 @@
 import logging
-from vllm.outputs import RequestOutput
-from typing import Any
+from tqdm import tqdm
+from typing import Any, Iterable, Union
 
 from comb.integration import InferenceEngine
-from comb.pic_manager import PICManager
+from comb.storage.pic_manager import PICManager
 from comb.storage.pic_utils import PICSpec
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class COMB:
@@ -31,15 +32,15 @@ class COMB:
         self,
         model: str,
         num_instances: int = 1,
-        pic_memory_utilization: float = 0.6,
+        pic_memory_utilization: float = 0.3,
         pbc_memory_utilization: float = 0.3,
         pic_separated: bool = False,
         **kwargs,
     ) -> None:
         if 'Comb' not in model:
-            logger.warning("The model is not a COMB model. Please use the basic LLM engine directly.")
+            raise ValueError("The model is not a COMB model. Please use the basic LLM engine directly.")
 
-        if pic_memory_utilization + pbc_memory_utilization <= 1.0:
+        if pic_memory_utilization + pbc_memory_utilization >= 1.0:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{pic_memory_utilization + pbc_memory_utilization}.")
@@ -62,9 +63,22 @@ class COMB:
 
     def generate(
         self,
-        prompts: dict[str, Any],
+        prompts: Union[Iterable[dict], dict[str, Any]],
+        need_store: bool = True,
         **kwargs,
-    ) -> list[RequestOutput]:
+    ) -> list[list[int]]:
+        if isinstance(prompts, dict):
+            return [self.generate_for_single_request(prompts, **kwargs)]
+
+        return [self.generate_for_single_request(prompt, need_store, **kwargs)
+                    for prompt in tqdm(prompts, desc="Generating with COMB")]
+    
+    def generate_for_single_request(
+        self,
+        prompts: dict[str, Any],
+        need_store: bool = True,
+        **kwargs,
+    ) -> list[int]:
         use_pic = False
         if "cross_attention_states" in prompts and \
                 prompts["cross_attention_states"] is not None:
@@ -77,14 +91,14 @@ class COMB:
 
             # Fetch PIC.
             rank, prompts["cross_attention_states"], chunk_hash = \
-                        self.pic_manager.fetch(prompts["chunk_ids"])
-            use_pic = True
+                    self.pic_manager.fetch(prompts["chunk_ids"], need_store)
+            use_pic = need_store
         else:
             # Round-robin allocation.
             rank = (self.next_rank + 1) % self.num_instances
             self.next_rank = rank
 
-        outputs = self.llm[rank].generate(prompts, **kwargs)
+        outputs = self.engines[rank].generate(prompts, **kwargs)
 
         if use_pic:
             # Decrease reference count.

@@ -23,7 +23,7 @@ def generate_answer(model_name):
                                 for i in ds["normal_input"]]
             # Generate answer using the backbone model
             output = llm.generate(
-                prompt_token_ids=prompt_token_ids,
+                [{"prompt_token_ids": token_ids} for token_ids in prompt_token_ids],
                 sampling_params=sampling_params,
             )
             answer = [o.outputs[0].token_ids for o in output]

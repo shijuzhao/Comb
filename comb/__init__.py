@@ -2,7 +2,7 @@
 
 import typing
 
-MOUDULE_ATTRS = {
+MODULE_ATTRS = {
     "COMB": ".entrypoints.comb:COMB"
 }
 

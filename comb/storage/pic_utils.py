@@ -1,15 +1,11 @@
 from dataclasses import dataclass
+import numpy as np
 import torch
 from typing import NamedTuple
 from typing_extensions import Self
-from vllm.utils import get_dtype_size
 import xxhash
 
-from model.CombLlama import CombLlamaConfig
-
-CONFIG_MAPPING = {
-    'Llama': CombLlamaConfig
-}
+from comb.config import get_config
 
 @dataclass
 class CachePosition:
@@ -28,7 +24,7 @@ class CachePosition:
     def __lt__(self, other):
         return self.left < other.left
 
-    def split(self, length: int) -> tuple[CachePosition, CachePosition]:
+    def split(self, length: int) -> tuple["CachePosition", "CachePosition"]:
         assert length < self.right - self.left
         middle = self.left + length
         return CachePosition(self.left, middle), CachePosition(middle, self.right)
@@ -40,7 +36,7 @@ class ChunkHash(NamedTuple):
     # Hash value of the chunk
     hash_value: int
     # Token IDs
-    token_ids: list[int]
+    token_ids: tuple[int, ...]
 
 @dataclass
 class PICInfo:
@@ -48,11 +44,11 @@ class PICInfo:
     # The device rank where the chunk is stored
     rank: int
     # Reference count
-    ref_cnt: int = 0
+    ref_cnt: int
     # The number of requests to pin the memory
-    pin_cnt: int = 0
+    pin_cnt: int
     # Positions
-    cache_positions: list[CachePosition] = []
+    cache_positions: list[CachePosition]
     # Hash value of the chunk
     chunk_hash: ChunkHash
 
@@ -78,37 +74,29 @@ class PICSpec:
     dtype: torch.dtype
     @classmethod
     def from_pretrained(cls, model: str) -> Self:
-        config = None
-        for model_type in CONFIG_MAPPING:
-            if model_type in model:
-                config = CONFIG_MAPPING[model_type].from_pretrained(model)
-                break
-
-        if config is None:
-            raise NotImplementedError(f"Model {model} is not implemented.")
-
+        config = get_config(model)
         return cls(
-            model_name=model
+            model_name=model,
             num_layers=len(config.cross_attention_layers),
             num_key_value_heads=config.text_config.num_key_value_heads,
             head_dim=config.text_config.head_dim,
-            dtype=torch.float32
+            dtype=config.torch_dtype,
         )
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         """The shape of PIC for one layer."""
-        return torch.Size(2, num_tokens, self.num_key_value_heads, self.head_dim)
+        return torch.Size((2, 1, self.num_key_value_heads, num_tokens, self.head_dim))
 
     @property
     def size(self) -> int:
         """The size of single token's PIC."""
         return 2 * self.num_layers * self.num_key_value_heads * self.head_dim \
-                * get_dtype_size(self.dtype)
+                * torch.tensor([], dtype=self.dtype).element_size()
 
 def hash_tokens(tokens: list[int]) -> ChunkHash:
     """Compute a simple hash for a list of tokens."""
-    hash_value = xxhash.xxh32(tuple(tokens)).intdigest()
-    return ChunkHash(hash_value=hash_value, token_ids=tokens)
+    hash_value = xxhash.xxh32(np.array(tokens, dtype=np.int32).tobytes()).intdigest()
+    return ChunkHash(hash_value=hash_value, token_ids=tuple(tokens))
 
 def merge_position(cp: list[CachePosition]) -> list[CachePosition]:
     """Merge the cache positions if they are continuous."""
@@ -120,7 +108,7 @@ def merge_position(cp: list[CachePosition]) -> list[CachePosition]:
             # If the positions are adjacent, merge them.
             merged_cp[-1].right = cp_new.right
         else:
-            merged_cp.push(cp_new)
+            merged_cp.append(cp_new)
 
     return merged_cp
     

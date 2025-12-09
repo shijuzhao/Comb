@@ -5,8 +5,13 @@ from .Xsum import XsumDataset
 from .LongBench import *
 
 TRAIN_DATASETS = ["SQuAD", "Natural-Instructions", "XSum", "Super-Natural-Instructions"]
-TEST_DATASETS = [HotpotQADataset, MultiNewsDataset, SAMSumDataset,
-                MuSiQueDataset, WikiMQADataset]
+TEST_DATASETS = {
+    "hotpotqa": HotpotQADataset,
+    "multinews": MultiNewsDataset,
+    "samsum": SAMSumDataset,
+    "musique": MuSiQueDataset,
+    "wikimqa": WikiMQADataset,
+}
 
 DATASET_DICT = {
     "SQuAD": SquadDataset,

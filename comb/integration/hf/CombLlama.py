@@ -86,7 +86,6 @@ class CombLlamaConfig(PretrainedConfig):
         self.cross_attention_layers = cross_attention_layers
         if text_config is None:
             self.text_config = LlamaConfig()
-            logger.info("text_config is None, using default llama config")
         elif isinstance(text_config, dict):
             self.text_config = LlamaConfig(**text_config)
         elif isinstance(text_config, LlamaConfig):
@@ -95,27 +94,14 @@ class CombLlamaConfig(PretrainedConfig):
         super().__init__(pad_token_id=pad_token_id,
                         tie_word_embeddings=tie_word_embeddings, **kwargs)
     
-# Copied from transformers.models.llama.modeling_llama.repeat_kv
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=0, repeats=n_rep). The hidden states go from (
-    num_key_value_heads, seqlen, head_dim) to (num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
 class CrossAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: LlamaConfig, layer_idx: int) -> None:
         super().__init__()
         self.config = config
-        self.num_heads = self.config.num_attention_heads
-        self.num_key_value_heads = self.config.num_key_value_heads
-        self.dropout = 0.0
+        self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
         # we should modify the layer index to avoid conflict of KV cache with the text model
@@ -453,8 +439,8 @@ class CombLlamaChunkModel(CombLlamaPreTrainedModel):
             )
             key_states = self.k_proj[idx](hidden_states)
             value_states = self.v_proj[idx](hidden_states)
-            key_states = key_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-            value_states = value_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, l, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, l, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             cross_attention_states.append((key_states, value_states))
 
         return cross_attention_states
@@ -471,7 +457,7 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
         self.cross_attention_layers = config.cross_attention_layers
 
         layers = [LlamaDecoderLayer(text_config, layer_idx)
-                for layer_idx in range(config.num_hidden_layers - len(self.cross_attention_layers))]
+                for layer_idx in range(config.text_config.num_hidden_layers)]
         cross_layers = [CombLlamaCrossAttentionDecoderLayer(text_config, layer_idx)
                 for layer_idx in self.cross_attention_layers]
 
@@ -584,7 +570,6 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
-        next_cache = None
 
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
@@ -643,7 +628,7 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
+            past_key_values=past_key_values,
             hidden_states=all_hidden_states,
         )
 

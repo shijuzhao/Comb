@@ -2,18 +2,13 @@ import torch
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from comb.integration.hf.CombLlama import (CombLlamaConfig, CombLlamaChunkModel,
-                                            CombLlamaForConditionalGeneration)
+from comb.integration.hf.CombLlama import CombLlamaConfig, CombLlamaForConditionalGeneration
 
 CONFIG_MAPPING = {
     'Llama': CombLlamaConfig
 }
 
-CHUNK_MODEL_MAPPING = {
-    'Llama': CombLlamaChunkModel
-}
-
-BACKBONE_MODEL_MAPPING = {
+MODEL_CLASS_MAPPING = {
     'Llama': CombLlamaForConditionalGeneration
 }
 
@@ -24,11 +19,14 @@ def get_config(model: str) -> PretrainedConfig:
 
     raise NotImplementedError(f"Model {model} is not implemented.")
 
-def get_model_class(model: str, chunk_or_backbone: bool) -> PreTrainedModel:
-    mapping = CHUNK_MODEL_MAPPING if chunk_or_backbone else BACKBONE_MODEL_MAPPING
-    for model_type in mapping:
+def get_model(model: str) -> PreTrainedModel:
+    for model_type in MODEL_CLASS_MAPPING:
         if model_type in model:
-            return mapping[model_type]
+            model_class = MODEL_CLASS_MAPPING[model_type]
+            return model_class.from_pretrained(
+                model,
+                torch_dtype=torch.bfloat16,
+            )
 
     raise NotImplementedError(f"Model {model} is not implemented.")
 

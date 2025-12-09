@@ -28,7 +28,7 @@ def distill_from_llama(model_name):
                 for i in data_to_be_distilled["normal_input"]]
             # Generate answer using the backbone model
             output = llm.generate(
-                prompt_token_ids=prompt_token_ids,
+                [{"prompt_token_ids": token_ids} for token_ids in prompt_token_ids],
                 sampling_params=sampling_params,
             )
             answer = [tokenizer.apply_chat_template(

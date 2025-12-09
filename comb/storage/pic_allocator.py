@@ -1,9 +1,7 @@
 from collections import deque, OrderedDict
-import gc
-import torch
 
-from comb.storage.pic_utils import CachePosition, PICSpec, ChunkHash, PICInfo, \
-                                    merge_position
+from comb.storage.pic_utils import CachePosition, ChunkHash, PICInfo, merge_position
+                                    
 
 class PICAllocator:
     def __init__(
@@ -25,7 +23,7 @@ class PICAllocator:
             cp = self.free_slots.pop()
             length = len(cp)
             if num_tokens < length:
-                allocated_cp, remaining_cp = cp.split(length)
+                allocated_cp, remaining_cp = cp.split(num_tokens)
                 cache_positions.append(allocated_cp)
                 self.free_slots.append(remaining_cp)
                 break
@@ -42,7 +40,7 @@ class PICAllocator:
         self.cached_pic[pic_info.chunk_hash] = pic_info
 
     def reset(self) -> None:
-        self.free_slots = deque(CachePosition(0, self.total_slots))
+        self.free_slots = deque([CachePosition(0, self.total_slots)])
         self.num_free_slots = self.total_slots
         self.cached_pic.clear()
 
@@ -57,11 +55,12 @@ class PICAllocator:
         num_tokens: int,
     ) -> tuple[bool, list[ChunkHash]]:
         preempted_pic = []
-        for chunk_hash, pic_info in self.cached_pic.items():
+        for chunk_hash, pic_info in list(self.cached_pic.items()):
             if pic_info.ref_cnt or pic_info.pin_cnt:
                 continue
 
             preempted_pic.append(chunk_hash)
+            del self.cached_pic[chunk_hash]
             for cp in pic_info.cache_positions:
                 self.free_slots.appendleft(cp)
 
