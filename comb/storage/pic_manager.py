@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the COMB project
 import gc
 import logging
 import time
@@ -124,10 +126,15 @@ class PICManager:
         # TODO(OPTIMIZE): Maybe we need a new thread for each rank.
         # `Copy` operation can be parallelized.
         with torch.cuda.stream(self.copy_streams[rank]):
-            indices = torch.cat([cp.to_range(rank) for cp in cache_positions], dim=0)
+            if len(cache_positions) == 1:
+                # Use slice for efficiency.
+                indices = cache_positions[0].to_slice()
+            else:
+                indices = torch.cat([cp.to_range(rank) for cp in cache_positions], dim=0)
+                
             for i, pic in enumerate(self.pic[rank]):
-                pic[0, :, :, indices].copy_(cross_attention_states[i][0])
-                pic[1, :, :, indices].copy_(cross_attention_states[i][1])
+                pic[0, :, indices] = cross_attention_states[i][0]
+                pic[1, :, indices] = cross_attention_states[i][1]
 
     def unpin(
         self,
@@ -160,9 +167,14 @@ class PICManager:
         rank: int,
         cache_positions: list[CachePosition],
     ) -> list[torch.Tensor]:
-        with torch.cuda.stream(self.copy_streams[rank]):
+        if len(cache_positions) == 1:
+            # Use slice for efficiency.
+            indices = cache_positions[0].to_slice()
+        else:
             indices = torch.cat([cp.to_range(rank) for cp in cache_positions], dim=0)
-            return [(pt[0, :, :, indices], pt[1, :, :, indices]) for pt in self.pic[rank]]
+
+        with torch.cuda.stream(self.copy_streams[rank]):
+            return [(pt[0, :, indices], pt[1, :, indices]) for pt in self.pic[rank]]
 
     def _initialize_pic(
         self,

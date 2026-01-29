@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import os
 import json
 
-from models.CombLlama import CombLlamaConfig, CombLlamaForConditionalGeneration
+from comb.integration.hf.CombLlama import CombLlamaConfig, CombLlamaForConditionalGeneration
 from data import TRAIN_DATASETS, DATASET_DICT
 from data.base import CPU_NUM, collate_fn
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the COMB project
 from collections import deque, OrderedDict
 
 from comb.storage.pic_utils import CachePosition, ChunkHash, PICInfo, merge_position

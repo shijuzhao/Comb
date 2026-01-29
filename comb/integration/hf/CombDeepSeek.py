@@ -1,23 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the COMB project
 """
-In this file, we implement the CombLlama model, 
+In this file, we implement the CombDeepSeek model, 
 which is a combination of a text backbone and a chunk model.
 """
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import DeepseekV2Config
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaMLP, \
-            LlamaRotaryEmbedding, LlamaDecoderLayer, eager_attention_forward
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import (  # type: ignore[import-error]
+    DeepseekV2MoEGate,
+    DeepseekV2RMSNorm,
+    DeepseekV2MLP,
+    DeepseekV2RotaryEmbedding,
+    DeepseekV2DecoderLayer,
+    eager_attention_forward,
+)
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, \
             can_return_tuple, is_torch_flex_attn_available, logging
+from transformers.utils.generic import OutputRecorder, check_model_inputs
 from typing import Callable, List, Optional, Tuple, Union
 
 if is_torch_flex_attn_available():
@@ -26,108 +36,96 @@ if is_torch_flex_attn_available():
 
 logger = logging.get_logger(__name__)
 
-class CombLlamaConfig(PretrainedConfig):
+class CombDeepSeekConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of a [`CombLlamaForConditionalGeneration`]. It is used to instantiate an
-    CombLlama model according to the specified arguments, defining the model architecture.
+    This is the configuration class to store the configuration of a [`CombDeepSeekForConditionalGeneration`]. It is used to instantiate an
+    CombDeepSeek model according to the specified arguments, defining the model architecture.
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
 
     Args:
-        text_config (`Union[AutoConfig, dict]`, *optional*, defaults to `LlamaConfig`):
+        text_config (`Union[AutoConfig, dict]`, *optional*, defaults to `DeepseekV2Config`):
             The config object or dictionary of the text backbone.
-        chunk_token_index (`int`, *optional*, defaults to 128255):
+        chunk_token_index (`int`, *optional*, defaults to 100002):
             The chunk token index to encode the cached context.
-        num_hidden_layers (`int`, *optional*, defaults to 40):
+        num_hidden_layers (`int`, *optional*, defaults to 33):
             Number of hidden layers in the Transformer encoder.
         cross_attention_layers (`List[int]`, *optional*):
-            Indices of the position where we insert cross attention layers. If not specified, will default to [3, 7, 11, 15, 19, 23, 27, 31].
+            Indices of the position where we insert cross attention layers. If not specified, will default to [3, 7, 11, 15, 19, 23].
 
     Example:
 
     ```python
-    >>> from transformers import CombLlamaForConditionalGeneration, LlamaConfig, CombLlamaTextConfig
+    >>> from transformers import CombDeepSeekForConditionalGeneration, DeepseekV2Config, CombDeepSeekTextConfig
 
-    >>> # Initializing a Llama config
-    >>> text_config = LlamaConfig()
+    >>> # Initializing a DeepSeek config
+    >>> text_config = DeepseekV2Config()
 
-    >>> # Initializing a CombLlama style configuration
-    >>> configuration = CombLlamaConfig(text_config)
+    >>> # Initializing a CombDeepSeek style configuration
+    >>> configuration = CombDeepSeekConfig(text_config)
 
-    >>> # Initializing a model from the CombLlama style configuration
-    >>> model = CombLlamaForConditionalGeneration(configuration)
+    >>> # Initializing a model from the CombDeepSeek style configuration
+    >>> model = CombDeepSeekForConditionalGeneration(configuration)
 
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
 
-    model_type = "combllama"
+    model_type = "combdeepseek"
     attribute_map = {
         "chunk_token_id": "chunk_token_index",
     }
-    sub_configs = {"text_config": LlamaConfig}
+    sub_configs = {"text_config": DeepseekV2Config}
 
     def __init__(
         self,
-        text_config: Optional[LlamaConfig] = None,
-        chunk_token_index: int = 128255,
-        num_hidden_layers: int = 40,
+        text_config: Optional[DeepseekV2Config] = None,
+        chunk_token_index: int = 100002,
+        num_hidden_layers: int = 33,
         cross_attention_layers: Optional[List[int]] = None,
-        pad_token_id: Optional[int] = 128004,
+        pad_token_id: Optional[int] = 100001,
         tie_word_embeddings: bool = False,
         **kwargs,
     ):
         if cross_attention_layers is None:
-            cross_attention_layers = [3, 7, 11, 15, 19, 23, 27, 31]
+            cross_attention_layers = [3, 7, 11, 15, 19, 23]
 
         self.chunk_token_index = chunk_token_index
         self.num_hidden_layers = num_hidden_layers
         self.cross_attention_layers = cross_attention_layers
         if text_config is None:
-            self.text_config = LlamaConfig()
-            logger.info("text_config is None, using default llama config")
+            self.text_config = DeepseekV2Config()
         elif isinstance(text_config, dict):
-            self.text_config = LlamaConfig(**text_config)
-        elif isinstance(text_config, LlamaConfig):
+            self.text_config = DeepseekV2Config(**text_config)
+        elif isinstance(text_config, DeepseekV2Config):
             self.text_config = text_config
 
+        # We have to bind the `num_hidden_layers` to text_config,
+        # because the number of layers in `DynamicCache` depends on it.
+        self.text_config.num_hidden_layers = self.num_hidden_layers
         super().__init__(pad_token_id=pad_token_id,
                         tie_word_embeddings=tie_word_embeddings, **kwargs)
-    
-# Copied from transformers.models.llama.modeling_llama.repeat_kv
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=0, repeats=n_rep). The hidden states go from (
-    num_key_value_heads, seqlen, head_dim) to (num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 class CrossAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig, layer_idx: int) -> None:
+    def __init__(self, config: DeepseekV2Config, layer_idx: int) -> None:
         super().__init__()
         self.config = config
-        self.num_heads = self.config.num_attention_heads
-        self.num_key_value_heads = self.config.num_key_value_heads
-        self.dropout = 0.0
+        self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads if config.num_key_value_heads else self.num_heads
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
-        # we should modify the layer index to avoid conflict of KV cache with the text model
-        self.layer_idx = layer_idx + config.num_hidden_layers
+        self.layer_idx = layer_idx
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.scaling = self.head_dim**-0.5
 
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        self.q_norm = LlamaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = LlamaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = DeepseekV2RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = DeepseekV2RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -135,7 +133,6 @@ class CrossAttention(nn.Module):
         cross_attention_states: Optional[torch.Tensor] = None,
         past_key_value: Optional[Cache] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -148,6 +145,7 @@ class CrossAttention(nn.Module):
         if cross_attention_states is not None:
             key_states, value_states = cross_attention_states
             key_states = self.k_norm(key_states)
+            key_states, value_states = key_states.transpose(1, 2), value_states.transpose(1, 2)
             if past_key_value is not None and past_key_value.get_seq_length(self.layer_idx) == 0:
                 # if we have a new chunk, we update the cross key states and use it!
                 key_states, value_states = past_key_value.update(
@@ -166,13 +164,7 @@ class CrossAttention(nn.Module):
         attention_interface: Callable = eager_attention_forward
 
         if self.config._attn_implementation != "eager":
-            if self.config._attn_implementation == "sdpa" and output_attentions:
-                logger.warning_once(
-                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-                )
-            else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -188,24 +180,21 @@ class CrossAttention(nn.Module):
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
         attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
-            attn_weights = None
-
         return attn_output, attn_weights
 
-class CombLlamaCrossAttentionDecoderLayer(torch.nn.Module):
+class CombDeepSeekCrossAttentionDecoderLayer(GradientCheckpointingLayer):
     """Cross-attention transformer block with tanh-gated attention and feedforward."""
 
-    def __init__(self, config: LlamaConfig, layer_idx: int) -> None:
+    def __init__(self, config: DeepseekV2Config, layer_idx: int) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.cross_attn = CrossAttention(config, layer_idx=layer_idx)
 
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = DeepseekV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.cross_attn_attn_gate = torch.nn.Parameter(torch.zeros(1))
 
-        self.mlp = LlamaMLP(config)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = DeepseekV2MLP(config)
+        self.post_attention_layernorm = DeepseekV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.cross_attn_mlp_gate = torch.nn.Parameter(torch.zeros(1))
 
     def forward(
@@ -215,19 +204,17 @@ class CombLlamaCrossAttentionDecoderLayer(torch.nn.Module):
         cross_attention_mask: torch.Tensor,
         # full_text_row_masked_out_mask: Tuple[torch.Tensor, torch.Tensor],
         past_key_value: Optional[Cache] = None,
-        output_attentions: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        hidden_states, attn_weights = self.cross_attn(
+        hidden_states, _ = self.cross_attn(
             hidden_states=hidden_states,
             attention_mask=cross_attention_mask,
             cross_attention_states=cross_attention_states,
             past_key_value=past_key_value,
-            output_attentions=output_attentions,
             cache_position=cache_position,
             **kwargs,
         )
@@ -240,28 +227,29 @@ class CombLlamaCrossAttentionDecoderLayer(torch.nn.Module):
         #     hidden_states = full_text_row_masked_out_mask[:, 0] * hidden_states  # type: ignore
         hidden_states = residual + self.cross_attn_mlp_gate.tanh() * hidden_states
 
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (attn_weights,)
-
-        return outputs
+        return hidden_states
 
 @auto_docstring
-class CombLlamaPreTrainedModel(PreTrainedModel):
-    config_class = CombLlamaConfig
+class CombDeepSeekPreTrainedModel(PreTrainedModel):
+    config_class = CombDeepSeekConfig
     base_model_prefix = ""
     supports_gradient_checkpointing = True
     _no_split_modules = [
-        "CombLlamaChunkModel",
-        "CombLlamaCrossAttentionDecoderLayer",
-        "LlamaDecoderLayer",
+        "CombDeepSeekChunkModel",
+        "CombDeepSeekCrossAttentionDecoderLayer",
+        "DeepseekV2DecoderLayer",
     ]
     _can_compile_fullgraph = False  # static cache cannot have different shapes for each layer
     _supports_sdpa = True
     _supports_flash_attn = True
     _supports_flex_attn = True
     _supports_attention_backend = True
+    _can_record_outputs = {
+        "hidden_states": [DeepseekV2DecoderLayer, CombDeepSeekCrossAttentionDecoderLayer],
+        "attentions": [
+            OutputRecorder(CrossAttention, index=1, layer_name="cross_attn"),
+        ],
+    }
 
     def _init_weights(self, module):
         std = getattr(self.config, "initializer_range", self.config.get_text_config().initializer_range)
@@ -277,11 +265,13 @@ class CombLlamaPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.weight.data.fill_(1.0)
             module.bias.data.zero_()
-        elif isinstance(module, LlamaRMSNorm):
+        elif isinstance(module, DeepseekV2RMSNorm):
             module.weight.data.fill_(1.0)
-        elif isinstance(module, CombLlamaCrossAttentionDecoderLayer):
+        elif isinstance(module, CombDeepSeekCrossAttentionDecoderLayer):
             module.cross_attn_attn_gate.data.zero_()
             module.cross_attn_mlp_gate.data.zero_()
+        elif isinstance(module, DeepseekV2MoEGate):
+            module.weight.data.normal_(mean=0.0, std=std)
 
     # Copied from transformers.models.gptj.modeling_gptj.GPTJModel._update_causal_mask
     def _update_causal_mask(
@@ -408,11 +398,11 @@ class CombLlamaPreTrainedModel(PreTrainedModel):
 
         return causal_mask
 
-class CombLlamaChunkModel(CombLlamaPreTrainedModel):
-    config_class = CombLlamaConfig
+class CombDeepSeekChunkModel(CombDeepSeekPreTrainedModel):
+    config_class = CombDeepSeekConfig
     base_model_prefix = "chunk_model"
 
-    def __init__(self, config: CombLlamaConfig):
+    def __init__(self, config: CombDeepSeekConfig):
         self.num_cross_layers = len(config.cross_attention_layers)
         config = config.get_text_config()
         super().__init__(config)
@@ -421,9 +411,9 @@ class CombLlamaChunkModel(CombLlamaPreTrainedModel):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = config.num_attention_heads // self.num_key_value_heads
         self.embed_tokens = nn.Embedding(config.vocab_size, self.hidden_size, config.pad_token_id)
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config, layer_idx)
+        self.layers = nn.ModuleList([DeepseekV2DecoderLayer(config, layer_idx)
                                 for layer_idx in range(self.num_cross_layers)])
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+        self.rotary_emb = DeepseekV2RotaryEmbedding(config=config)
         self.k_proj = nn.ModuleList([
             nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
                 for _ in range(self.num_cross_layers)
@@ -453,32 +443,33 @@ class CombLlamaChunkModel(CombLlamaPreTrainedModel):
             )
             key_states = self.k_proj[idx](hidden_states)
             value_states = self.v_proj[idx](hidden_states)
-            key_states = key_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-            value_states = value_states.view(bsz, -1, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, l, self.num_key_value_heads, self.head_dim)
+            value_states = value_states.view(bsz, l, self.num_key_value_heads, self.head_dim)
             cross_attention_states.append((key_states, value_states))
 
         return cross_attention_states
 
-class CombLlamaTextModel(CombLlamaPreTrainedModel):
-    config_class = CombLlamaConfig
+class CombDeepSeekTextModel(CombDeepSeekPreTrainedModel):
+    config_class = CombDeepSeekConfig
     base_model_prefix = "language_model.model"
-    def __init__(self, config: CombLlamaConfig):
+    def __init__(self, config: CombDeepSeekConfig):
+        super().__init__(config)
         text_config = config.get_text_config()
-        super().__init__(text_config)
         self.padding_idx = text_config.pad_token_id
         self.vocab_size = text_config.vocab_size
         self.embed_tokens = nn.Embedding(text_config.vocab_size, text_config.hidden_size, self.padding_idx)
         self.cross_attention_layers = config.cross_attention_layers
 
-        layers = [LlamaDecoderLayer(text_config, layer_idx)
-                for layer_idx in range(config.num_hidden_layers - len(self.cross_attention_layers))]
-        cross_layers = [CombLlamaCrossAttentionDecoderLayer(text_config, layer_idx)
-                for layer_idx in self.cross_attention_layers]
+        num_self_attn_layers = config.num_hidden_layers - len(config.cross_attention_layers)
+        layers = [DeepseekV2DecoderLayer(text_config, layer_idx)
+                for layer_idx in range(num_self_attn_layers)]
+        cross_layers = [CombDeepSeekCrossAttentionDecoderLayer(text_config, layer_idx)
+                for layer_idx in range(num_self_attn_layers, config.num_hidden_layers)]
 
         self.layers = nn.ModuleList(layers)
         self.cross_layers = nn.ModuleList(cross_layers)
-        self.norm = LlamaRMSNorm(text_config.hidden_size, eps=text_config.rms_norm_eps)
-        self.rotary_emb = LlamaRotaryEmbedding(config=text_config)
+        self.norm = DeepseekV2RMSNorm(text_config.hidden_size, eps=text_config.rms_norm_eps)
+        self.rotary_emb = DeepseekV2RotaryEmbedding(config=text_config)
         self.gradient_checkpointing = False
         self.post_init()
 
@@ -488,6 +479,8 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    @check_model_inputs()
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -500,13 +493,11 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         """
-        The text backbone of the CombLlama model.
+        The text backbone of the CombDeepSeek model.
         
         Args:
             cross_attention_states (`torch.FloatTensor`, *optional*):
@@ -529,13 +520,13 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
 
         ```python
         >>> from transformers import AutoTokenizer
-        >>> from models.CombLlama import CombLlamaTextModel
+        >>> from comb.integration.hf.CombDeepSeek import CombDeepSeekTextModel
 
-        >>> checkpoint = "models/final_model/CombLlama-9B-Instruct"
-        >>> model = CombLlamaTextModel.from_pretrained(checkpoint)
+        >>> checkpoint = "PIC-COMB/CombDeepseek-V2-Lite"
+        >>> model = CombDeepSeekTextModel.from_pretrained(checkpoint)
         >>> tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 
-        >>> text = "If I had to write a haiku, it would be:"
+        >>> text = "What is the best thing to do in San Francisco?"
         >>> inputs = tokenizer(text=text, return_tensors="pt")
 
         >>> output = model(**inputs)
@@ -544,20 +535,10 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
         torch.Size([1, 13, 4096])
         ```
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-            )
-            use_cache = False
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -565,7 +546,7 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
         hidden_states = inputs_embeds
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+            past_key_values = DynamicCache(config=self.config)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -576,20 +557,13 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
             position_ids = cache_position.unsqueeze(0)
 
         causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+            attention_mask, inputs_embeds, cache_position, past_key_values
         )
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        next_cache = None
-
         for idx, decoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
             # Here we check whether we need to compute cross attention states.
             # Let's check if the layer is cross attention layer and if we have cross attention states
             # or cached cross attention states.
@@ -598,58 +572,38 @@ class CombLlamaTextModel(CombLlamaPreTrainedModel):
 
             if is_cross_attention_layer and (cross_attention_states is not None or have_cross_attention_cache):
                 cross_layer_id = self.cross_attention_layers.index(idx)
-                layer_outputs = self.cross_layers[cross_layer_id](
+                hidden_states = self.cross_layers[cross_layer_id](
                     hidden_states,
                     cross_attention_states=cross_attention_states[cross_layer_id] if cross_attention_states else None,
                     cross_attention_mask=cross_attention_mask,
                     # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
                     past_key_value=past_key_values,
-                    output_attentions=output_attentions,
                     cache_position=cache_position,
                     **kwargs,
                 )
-                hidden_states = layer_outputs[0]
             
             # Next, we compute the self attention layer.
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    causal_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                    cache_position,
-                    position_embeddings,
-                )
-            else:
-                hidden_states = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                    **kwargs,
-                )
+            hidden_states = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
 
         hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
+            past_key_values=past_key_values,
         )
 
 @auto_docstring
-class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
-    config_class = LlamaConfig
+class CombDeepSeekForCausalLM(CombDeepSeekPreTrainedModel, GenerationMixin):
+    config_class = DeepseekV2Config
     _supports_static_cache = True  # only the LLM without cross attn can do compile
     base_model_prefix = "language_model"
 
@@ -657,17 +611,12 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
         super().__init__(config.get_text_config())
         self.text_config = config.get_text_config()
         self.vocab_size = self.text_config.vocab_size
-        self.model = CombLlamaTextModel._from_config(config)
+        self.model = CombDeepSeekTextModel._from_config(config)
         self.lm_head = nn.Linear(self.text_config.hidden_size, self.vocab_size, bias=False)
 
         self.post_init()
 
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
@@ -681,8 +630,6 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         shift_labels: Optional[torch.LongTensor] = None,
@@ -724,28 +671,25 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
 
         ```python
         >>> from transformers import AutoTokenizer
-        >>> from models.CombLlama import CombLlamaForCausalLM
+        >>> from comb.integration.hf.CombDeepSeek import CombDeepSeekForCausalLM
 
-        >>> model_name = "meta-llama/Llama-3.1-8B-Instruct"
-        >>> model = CombLlamaForCausalLM.from_pretrained(model_name)
+        >>> model_name = "PIC-COMB/CombDeepseek-V2-Lite"
+        >>> model = CombDeepSeekForCausalLM.from_pretrained(model_name)
         >>> tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        >>> prompt = "If I had to write a haiku, it would be:"
+        >>> prompt = "What is the best thing to do in San Francisco?"
         >>> inputs = tokenizer(prompt, return_tensors="pt")
 
         >>> # Generate
-        >>> generate_ids = model.generate(inputs.input_ids, max_length=40, do_sample=True, temperature=0.6)
+        >>> generate_ids = model.generate(inputs.input_ids, max_length=16, do_sample=True, temperature=0.6)
         >>> result = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         >>> print(result)
-        If I had to write a haiku, it would be: "Snowflakes gently fall" - simple, yet peaceful.
-        I love the idea of snowflakes gently falling, each one
+
+        assistant
+
+        San Francisco is a popular destination for a fun and exciting vacation. We have a
         ```
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -757,8 +701,6 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
             cache_position=cache_position,
             **kwargs,
         )
@@ -777,11 +719,13 @@ class CombLlamaForCausalLM(CombLlamaPreTrainedModel, GenerationMixin):
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
 
 @auto_docstring
-class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixin):
-    def __init__(self, config: CombLlamaConfig, from_scratch: bool = False):
+class CombDeepSeekForConditionalGeneration(CombDeepSeekPreTrainedModel, GenerationMixin):
+    config_class = CombDeepSeekConfig
+    def __init__(self, config: CombDeepSeekConfig, from_scratch: bool = False):
         """
             from_scratch (`bool`): whether to initialize the new parameters, used when training. 
         """
@@ -789,12 +733,12 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
-        self.chunk_model = CombLlamaChunkModel._from_config(config)
-        self.language_model = CombLlamaForCausalLM._from_config(config)
+        self.chunk_model = CombDeepSeekChunkModel._from_config(config)
+        self.language_model = CombDeepSeekForCausalLM._from_config(config)
         self.post_init()
         if from_scratch:
-            self.language_model = CombLlamaForCausalLM.from_pretrained(
-                "meta-llama/Llama-3.1-8B-Instruct", config=config)
+            self.language_model = CombDeepSeekForCausalLM.from_pretrained(
+                "deepseek-ai/DeepSeek-V2-Lite", config=config)
             # Init weights for embedding
             self.chunk_model.embed_tokens.load_state_dict(
                 self.language_model.model.embed_tokens.state_dict())
@@ -833,8 +777,6 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         shift_labels: Optional[torch.LongTensor] = None,
@@ -881,33 +823,29 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
 
         ```python
         >>> from transformers import AutoTokenizer
-        >>> from models.CombLlama import CombLlamaForConditionalGeneration
+        >>> from comb.integration.hf.CombDeepSeek import CombDeepSeekForConditionalGeneration
 
-        >>> checkpoint = "models/final_model/ClmbLlama-9B-Instruct"
-        >>> model = CombLlamaForConditionalGeneration.from_pretrained(checkpoint)
+        >>> checkpoint = "PIC-COMB/CombDeepSeek-V2-Lite"
+        >>> model = CombDeepSeekForConditionalGeneration.from_pretrained(checkpoint)
         >>> tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 
-        >>> prompt = "If I had to write a haiku for this one"
+        >>> prompt = "What is the best thing to do in San Francisco?"
 
         >>> inputs = tokenizer(text=prompt, return_tensors="pt")
-        >>> chunk = tokenizer("A stop sign in Chinatown.", return_tensors="pt")
+        >>> chunk = tokenizer("The best thing to do in San Francisco is "
+            "to eat a sandwich and sit in Dolores Park on a sunny day.", return_tensors="pt")
 
         >>> # Generate
         >>> output = model.generate(input_ids=inputs.input_ids,
-                            chunk_ids=chunk.input_ids, max_new_tokens=15)
+                            chunk_ids=chunk.input_ids, max_new_tokens=16)
 
         >>> prompt_len = inputs.input_ids.shape[-1]
         >>> generated_ids = output[:, prompt_len:]
         >>> generated_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         >>> print(generated_text)
-        [', it would be:.\\nA stop sign in Chinatown.\\n']
+        ['Eat a sandwich and sit in Dolores Park on a sunny day.']
         ```
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -945,8 +883,6 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
             past_key_values=past_key_values,
             use_cache=use_cache,
             inputs_embeds=inputs_embeds,
-            output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
             cache_position=cache_position,
             logits_to_keep=logits_to_keep,
             **kwargs,
@@ -965,9 +901,10 @@ class CombLlamaForConditionalGeneration(CombLlamaPreTrainedModel, GenerationMixi
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
     
 if __name__ == "__main__":
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"
-    model = CombLlamaForConditionalGeneration(from_scratch=True,
-                config=CombLlamaConfig(LlamaConfig.from_pretrained(model_name)))
+    model_name = "deepseek-ai/DeepSeek-V2-Lite"
+    model = CombDeepSeekForConditionalGeneration(from_scratch=True,
+                config=CombDeepSeekConfig(DeepseekV2Config.from_pretrained(model_name)))

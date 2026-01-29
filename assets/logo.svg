@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80" viewBox="0 0 100 80">
+  
+  <text x="15" y="25" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="#2c5aa0">COMB</text>
+  <!-- 主梁 (梳子手柄) -->
+  <line x1="15" y1="35" x2="85" y2="35" stroke="#0066cc" stroke-width="2.5" />
+  
+  <!-- 位置独立缓存指示线 (虚线表示任意位置复用) -->
+  <path d="M25,55 Q50,30 75,55" stroke="#ff9900" stroke-width="2" fill="none" stroke-dasharray="4,2" />
+  
+  <!-- 缓存齿 (代表KV缓存结构) -->
+  <line x1="25" y1="35" x2="25" y2="75" stroke="#0066cc" stroke-width="2" />
+  <line x1="50" y1="35" x2="50" y2="75" stroke="#0066cc" stroke-width="2" />
+  <line x1="75" y1="35" x2="75" y2="75" stroke="#0066cc" stroke-width="2" />
+  
+  <!-- 位置独立标识 (C形环表示缓存复用) -->
+  <path d="M25,70 Q50,45 75,70" stroke="#00aaff" stroke-width="1.5" fill="none" />
+</svg>

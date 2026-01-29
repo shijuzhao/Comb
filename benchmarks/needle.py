@@ -7,7 +7,7 @@ import os
 from transformers import AutoTokenizer
 from vllm import LLM
 
-from benchmark_const import CHAT_TEMPLATE_PREFIX, COMB_MODEL_NAME
+from benchmark_const import CHAT_TEMPLATE_PREFIX
 from comb import COMB
 from data.needle import NeedleDataset
 
@@ -43,7 +43,7 @@ def needle_in_a_haystack(model_name, plot=False):
         for method in ['normal', 'comb']:
             fig, ax = plt.subplots()
             score = [[result[j*n+i][f'score_{method}'] for j in range(m)] for i in range(n)]
-            heatmap = ax.imshow(score, cmap='YlGn')
+            ax.imshow(score, cmap='YlGn', vmin=0, vmax=1)
             ax.set_xticks(range(m))
             ax.set_yticks(range(n))
             ax.set_xticklabels(x_labels)
@@ -68,16 +68,15 @@ def run_and_score(model_name, data):
     data = data.map(NeedleDataset.scorer, fn_kwargs={'method': 'normal'})
     del llm
 
-    comb = COMB(COMB_MODEL_NAME[model_name], pic_memory_utilization=0.1)
+    comb = COMB(model_name, pbc_memory_utilization=0.5)
+    comb.set_sampling_params(temperature=0.0, max_tokens=512)
     output = comb.generate(
         data,
         need_store=False,   # We do not need to reuse PIC here.
-        max_new_tokens=512,
-        do_sample=False,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    answer = [tokenizer.decode(o, skip_special_tokens=True).replace(template_prefix, "")
-                        for o in output]
+    answer = [tokenizer.decode(o.token_ids, skip_special_tokens=True
+                    ).replace(template_prefix, "") for o in output]
     data = data.add_column('output_comb', answer)
     data = data.map(NeedleDataset.scorer, fn_kwargs={'method': 'comb'})
     

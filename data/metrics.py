@@ -105,7 +105,4 @@ def f1_score(prediction, ground_truth, **kwargs):
 def qa_f1_score(prediction, ground_truth, **kwargs):
     prediction_tokens = normalize_answer(prediction)
     ground_truth_tokens = normalize_answer(ground_truth)
-    if ground_truth_tokens in prediction_tokens:
-        # The model explained the answer and f1 score is low. Give full score.
-        return 1.0
     return f1_score(prediction_tokens.split(), ground_truth_tokens.split())

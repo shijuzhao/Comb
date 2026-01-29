@@ -1,10 +1,12 @@
 datasets==3.6.0
 deepspeed==0.17.2
-huggingface_hub==0.31.2
-matplotlib==3.7.5
-numpy==2.3.1
+huggingface_hub==0.34.4
+matplotlib==3.10.0
+numpy==2.2.6
 rouge==1.0.1
 safetensors==0.5.3
-torch==2.7.1+cu128
+tensorboard==2.19.0
+torch==2.9.0
 tqdm==4.67.1
-transformers==4.54.0
+transformers==4.57.3
+xxhash==3.6.0

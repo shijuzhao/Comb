@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the COMB project
 import os
 
 from comb.integration.hf import HFEngine

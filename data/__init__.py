@@ -7,10 +7,17 @@ from .LongBench import *
 TRAIN_DATASETS = ["SQuAD", "Natural-Instructions", "XSum", "Super-Natural-Instructions"]
 TEST_DATASETS = {
     "hotpotqa": HotpotQADataset,
-    "multinews": MultiNewsDataset,
+    "multi_news": MultiNewsDataset,
     "samsum": SAMSumDataset,
     "musique": MuSiQueDataset,
-    "wikimqa": WikiMQADataset,
+    "2wikimqa": WikiMQADataset,
+}
+DATASET_NAME_PROJ = {
+    "hotpotqa": "HotpotQA",
+    "multi_news": "MultiNews",
+    "samsum": "SAMSum",
+    "musique": "MuSiQue",
+    "2wikimqa": "2WikiMQA",
 }
 
 DATASET_DICT = {

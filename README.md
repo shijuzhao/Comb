@@ -1,7 +1,42 @@
-# Comb
-Comb is a plug-and-play caching system for long-context LLM serving.
+<p align="center">
+  <picture>
+    <img alt="COMB" src="assets/logo.svg" width=55%>
+  </picture>
+</p>
 
-# Getting Started
+# COMB
+COMB is a plug-and-play caching system for long-context LLM serving.
+
+## Code Structure
+```
+COMB
+├── benchmarks                   # For benchmarking
+├── comb
+│   ├── entrypoints
+│   │   ├── api_server.py        # For online server
+│   │   └── comb.py              # For offline inference
+│   ├── integration
+│   │   ├── hf                   # hf transformers backend
+│   │   ├── vllm                 # vLLM backend
+│   │   └── __init__.py
+│   ├── storage
+│   │   ├── chunk_processor.py   # For generating PIC
+│   │   ├── pic_allocator.py     # For allocating memory
+│   │   ├── pic_manager.py       # For managing PIC
+│   │   └── pic_utils.py
+│   ├── transfer
+│   │   └── cuda_ipc_utils.py    # For inter-process communication
+│   ├── __init__.py
+│   ├── output.py
+│   └── supported_models.py
+├── data
+├── examples                     # For use case
+├── training                     # For training
+├── environment.yml
+└── requirements.txt
+```
+
+## Getting Started
 Run the following commands to prepare the environment. We recommend appending two `export` commands to the end of `~/.bashrc`.
 ```bash
 export PYTHONPATH=~/Comb:$PYTHONPATH
@@ -9,10 +44,20 @@ export TOKENIZERS_PARALLELISM=true
 pip install -r requirements.txt
 ```
 
-Install vllm.
+Install vllm. (Recommended for efficiency and benchmarking)
 ```bash
-cd vllm_v0.11.0
-VLLM_USE_PRECOMPILED=1 uv pip install --editable .
+pip install vllm
 ```
 
-Download the parameters of `CombLlama-11B-Instruct` from huggingface [link]. You can also train a Comb model by yourself through following our [instructions](training/README.md).
+Currently we only support `meta-llama/Llama-3.1-8B-Instruct` and `deepseek-ai/DeepSeek-V2-Lite-Chat`. If you want to use another model, you can also train a Comb model by yourself through following our [instructions](training/README.md).
+
+## Usage
+
+You can find examples in the folder `examples`.
+
+- [basic.py](examples/basic.py) for offline inference.
+- [online_serving.py](examples/online_serving.py) for server.
+
+## Benchmark
+
+See [Instructions](benchmarks/README.md).

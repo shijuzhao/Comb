@@ -28,7 +28,7 @@ class NeedleDataset(BenchmarkDataset):
         :param document_depth_percent_intervals: The number of intervals for the document depth percent. Default is 10.
         """
         retrieval_question = 'What is the best thing to do in San Francisco?'
-        answers = ['eat a sandwich and sit in Dolores Park on a sunny day.',
+        answers = ['Eat a sandwich and sit in Dolores Park on a sunny day.',
                     'The best thing to do in San Francisco is to eat a sandwich' \
                     ' and sit in Dolores Park on a sunny day.']
         self.haystack_dir = "PaulGrahamEssays"

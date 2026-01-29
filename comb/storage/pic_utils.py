@@ -1,11 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the COMB project
 from dataclasses import dataclass
 import numpy as np
 import torch
+from transformers import AutoConfig
 from typing import NamedTuple
 from typing_extensions import Self
 import xxhash
-
-from comb.config import get_config
 
 @dataclass
 class CachePosition:
@@ -31,6 +32,9 @@ class CachePosition:
 
     def to_range(self, rank: int) -> torch.Tensor:
         return torch.arange(self.left, self.right, device=torch.device(f"cuda:{rank}"))
+
+    def to_slice(self) -> slice:
+        return slice(self.left, self.right)
 
 class ChunkHash(NamedTuple):
     # Hash value of the chunk
@@ -74,18 +78,20 @@ class PICSpec:
     dtype: torch.dtype
     @classmethod
     def from_pretrained(cls, model: str) -> Self:
-        config = get_config(model)
+        config = AutoConfig.from_pretrained(model)
+        head_dim = (config.text_config.head_dim if config.model_type == 'combllama'
+                    else config.text_config.qk_nope_head_dim)
         return cls(
             model_name=model,
             num_layers=len(config.cross_attention_layers),
             num_key_value_heads=config.text_config.num_key_value_heads,
-            head_dim=config.text_config.head_dim,
-            dtype=config.torch_dtype,
+            head_dim=head_dim,
+            dtype=config.dtype,
         )
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         """The shape of PIC for one layer."""
-        return torch.Size((2, 1, self.num_key_value_heads, num_tokens, self.head_dim))
+        return torch.Size((2, 1, num_tokens, self.num_key_value_heads, self.head_dim))
 
     @property
     def size(self) -> int:

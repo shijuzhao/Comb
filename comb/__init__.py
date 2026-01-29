@@ -1,6 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the COMB project
 """Comb: a plug-and-play caching system for long-context LLM serving"""
 
 import typing
+
+# Import integration modules to register models
+import comb.integration.hf.register  # noqa: F401
 
 MODULE_ATTRS = {
     "COMB": ".entrypoints.comb:COMB"
