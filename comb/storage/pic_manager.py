@@ -123,9 +123,12 @@ class PICManager:
         cache_positions: list[CachePosition],
         cross_attention_states: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
-        # TODO(OPTIMIZE): Maybe we need a new thread for each rank.
-        # `Copy` operation can be parallelized.
+        # Ensure cross_attention_states (produced on current stream)
+        # is ready before copy_streams[rank] reads from it.
+        device = torch.device(f"cuda:{rank}")
+        event = torch.cuda.current_stream(device).record_event()
         with torch.cuda.stream(self.copy_streams[rank]):
+            self.copy_streams[rank].wait_event(event)
             if len(cache_positions) == 1:
                 # Use slice for efficiency.
                 indices = cache_positions[0].to_slice()
@@ -174,7 +177,13 @@ class PICManager:
             indices = torch.cat([cp.to_range(rank) for cp in cache_positions], dim=0)
 
         with torch.cuda.stream(self.copy_streams[rank]):
-            return [(pt[0, :, indices], pt[1, :, indices]) for pt in self.pic[rank]]
+            result = [(pt[0, :, indices], pt[1, :, indices]) for pt in self.pic[rank]]
+        # Ensure copy stream's read operations complete before
+        # the caller uses the result on the current/default stream.
+        device = torch.device(f"cuda:{rank}")
+        event = self.copy_streams[rank].record_event()
+        torch.cuda.current_stream(device).wait_event(event)
+        return result
 
     def _initialize_pic(
         self,

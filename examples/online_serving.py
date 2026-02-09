@@ -77,4 +77,3 @@ if __name__ == '__main__':
         main(model_name, port)
     finally:
         kill_process_tree(handle.pid)
-        pass
