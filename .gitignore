@@ -2,10 +2,7 @@
 training/checkpoints
 training/comb_training
 benchmarks/results
-
-# We do not want to host the weights on GitHub, because they are too large.
-models/CombLlama-11B-Instruct
-models/CombDeepseek-V2-Lite
+model/
 
 .DS_Store
 

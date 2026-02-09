@@ -5,7 +5,7 @@ python3 main.py
 
 ## Offline Experiment
 
-`./main.py --experiment offline` for Figure 4, 5, and 6.
+`./main.py --experiment offline` for Figure 4, 6, and 7.
 
 **Time consumed**
 - `Llama-3.1-8B-Instruct`: 6 hours;
@@ -13,11 +13,11 @@ python3 main.py
 
 ## KV Cache Size
 
-`./main.py --experiment cache_size` for Figure 7.
+`./main.py --experiment cache_size` for Figure 8.
 
 ## Online Experiment
 
-`./main.py --experiment online` for Figure 8.
+`./main.py --experiment online` for Figure 9.
 
 **Time Consumed**: 2 hours
 
