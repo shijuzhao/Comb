@@ -66,7 +66,8 @@ See [Instructions](benchmarks/README.md).
 
 In this example, we simulate two requests with different prefixes. The requests contain the same question and retrieved context, enabling the KV cache to be reused through PIC.
 
-<video width="640" height="360" controls>
+<!-- <video width="640" height="360" controls>
   <source src="assets/demo.mp4" type="video/mp4">
   Your browser does not support the video tag.
-</video>
+</video> -->
+[video:Demo](assets/demo.mp4)
