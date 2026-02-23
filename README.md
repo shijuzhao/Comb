@@ -66,7 +66,12 @@ See [Instructions](benchmarks/README.md).
 
 In this example, we simulate two requests with different prefixes. The requests contain the same question and retrieved context, enabling the KV cache to be reused through PIC.
 
-<video width="640" height="360" controls>
-  <source src="assets/demo.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+<p align="center">
+  <h3 align="center">🖥️ Demo</h3>
+  <video src="https://github.com/user-attachments/assets/ce6bf940-1e54-4b4c-9ea6-c2ae1afe1679"
+         controls
+         muted
+         playsinline>
+    <a href="https://github.com/user-attachments/assets/ce6bf940-1e54-4b4c-9ea6-c2ae1afe1679">Demo of TTFT speedup using COMB.</a>
+  </video>
+</p>
