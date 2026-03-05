@@ -62,7 +62,7 @@ You can find examples in the folder `examples`.
 
 See [Instructions](benchmarks/README.md).
 
-## Demo
+## Demo 
 
 In this example, we simulate two requests with different prefixes. The requests contain the same question and retrieved context, enabling the KV cache to be reused through PIC.
 
