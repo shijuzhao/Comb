@@ -10,6 +10,7 @@ COMB is a plug-and-play caching system for long-context LLM serving.
 ## Code Structure
 ```
 COMB
+├── assets
 ├── benchmarks                   # For benchmarking
 ├── comb
 │   ├── entrypoints

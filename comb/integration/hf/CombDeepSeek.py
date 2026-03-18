@@ -109,6 +109,7 @@ class CombDeepSeekConfig(PretrainedConfig):
 
 class CrossAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
+    is_causal = False
 
     def __init__(self, config: DeepseekV2Config, layer_idx: int) -> None:
         super().__init__()
@@ -413,6 +414,8 @@ class CombDeepSeekChunkModel(CombDeepSeekPreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, self.hidden_size, config.pad_token_id)
         self.layers = nn.ModuleList([DeepseekV2DecoderLayer(config, layer_idx)
                                 for layer_idx in range(self.num_cross_layers)])
+        for l in self.layers:
+            l.self_attn.is_causal = False
         self.rotary_emb = DeepseekV2RotaryEmbedding(config=config)
         self.k_proj = nn.ModuleList([
             nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)

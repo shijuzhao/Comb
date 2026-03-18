@@ -3,6 +3,7 @@
 import logging
 import torch
 from transformers import AutoModel
+from transformers.utils import is_flash_attn_2_available
 from typing import Any
 
 from comb.output import RequestOutput
@@ -43,7 +44,9 @@ class HFEngine:
 
     def load_weights(self, model: str) -> None:
         logger.info("Loading weights for language model...")
-        comb_model = AutoModel.from_pretrained(model, dtype=torch.bfloat16)
+        comb_model = AutoModel.from_pretrained(model, dtype=torch.bfloat16,
+                        attn_implementation="flash_attention_2"
+                        if is_flash_attn_2_available() else "sdpa")
         del comb_model.chunk_model
         self.model = comb_model.to(device=self.device)
         self.model.eval()
@@ -53,7 +56,8 @@ class HFEngine:
         self,
         **kwargs,
     ) -> None:
-        self.model.generation_config.update(**kwargs)
-        # NOTE: Setting temparature in `generation_config` is not functional.
-        if kwargs.get('temparature', None) == 0.0:
+        # NOTE: Setting temperature in `generation_config` is not functional.
+        if kwargs.pop('temperature', None) == 0.0:
             self.do_sample = False
+
+        self.model.generation_config.update(**kwargs)
